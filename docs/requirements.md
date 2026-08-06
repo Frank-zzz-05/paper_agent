@@ -48,7 +48,7 @@
 
 ### FR-6 RAG 问答与论文语料库（P5，设计已定稿）
 
-- `paper ask "<问题>" [--paper <ID>]`：对已入库论文做向量检索问答；指定 `--paper` 限单篇，否则跨篇检索；回答**标注出处**（章节）。
+- `paper ask "<问题>" [--paper <ID|标题>]`：对已入库论文做向量检索问答；默认检索**最近入库**的一篇，指定 `--paper`（ID 或标题）可检索之前的论文；回答**标注出处**（章节）。
 - `paper import <输入…>`：批量分块入库（不生成摘要），供后续检索。
 - `paper read` 成功后**自动入库**（被动积累，默认开启）。
 - 存储：`data/vectorstore/`（chromadb 本地持久化，gitignore）。设计细节见 development-plan.md §11。

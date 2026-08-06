@@ -234,16 +234,37 @@ def clear_cache():
     typer.echo(f"已清除 {n} 条缓存")
 
 
+def _resolve_paper_ref(ref: str, stored_ids: set[str], entries: list[dict]) -> str | None:
+    """把 `--paper` 参数解析为向量库中的 paper_id。
+
+    优先精确匹配 ID；否则按标题子串（忽略大小写）匹配。
+    `entries` 已按 read_at 倒序（最近入库优先），返回首个命中的 ID。
+    返回 None 表示无法解析。
+    """
+    if ref in stored_ids:
+        return ref
+    for e in entries:
+        if e["id"] not in stored_ids:
+            continue
+        title = e.get("meta", {}).get("title") or ""
+        if ref.lower() in title.lower():
+            return e["id"]
+    return None
+
+
 @app.command()
 def ask(
     question: str = typer.Argument(..., help="要问的问题"),
     paper_id: Optional[str] = typer.Option(
         None, "--paper", "-p",
-        help="限定某篇论文（不指定则检索全部已入库论文）",
+        help="限定某篇论文（ID 或标题，不指定则默认检索最近入库的一篇）",
     ),
     top_k: int = typer.Option(5, "--top-k", "-k", help="检索块数"),
 ):
-    """基于已入库论文进行问答（RAG）：检索相关段落 + 生成带出处回答。"""
+    """基于已入库论文进行问答（RAG）：检索相关段落 + 生成带出处回答。
+
+    默认问答范围是最近入库的一篇论文；用 --paper 指定 ID 或标题可检索之前的论文。
+    """
     try:
         from paper_agent.vectorstore import get_stored_paper_ids
     except ImportError as exc:
@@ -254,9 +275,26 @@ def ask(
     if not paper_ids:
         raise _fatal("向量库中没有论文。请先使用 `paper read` 阅读论文（会自动入库），或 `paper import` 批量导入。")
 
-    if paper_id and paper_id not in paper_ids:
-        typer.secho(f"⚠ 论文 {paper_id} 不在向量库中，将检索全部论文", fg=typer.colors.YELLOW, err=True)
-        paper_id = None
+    stored_ids = set(paper_ids)
+    cache_entries = cache.list_entries()  # 按 read_at 倒序 = 最近入库优先
+
+    # 默认范围：最近入库的一篇论文
+    latest_id = next((e["id"] for e in cache_entries if e["id"] in stored_ids), None)
+
+    if paper_id:
+        resolved = _resolve_paper_ref(paper_id, stored_ids, cache_entries)
+        if resolved is None:
+            typer.secho(
+                f"⚠ 找不到论文 {paper_id!r}（不在向量库中），默认改为检索最近入库的论文",
+                fg=typer.colors.YELLOW, err=True,
+            )
+            paper_id = latest_id
+        else:
+            paper_id = resolved
+    else:
+        if latest_id:
+            typer.secho(f"→ 默认检索最近入库的论文: {latest_id}", fg=typer.colors.BLUE, err=True)
+        paper_id = latest_id
 
     state: RAGState = {
         "question": question,

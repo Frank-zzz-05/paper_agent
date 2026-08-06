@@ -90,11 +90,12 @@ paper read 2404.07143 --output json
 `paper read` 成功后自动将论文分块写入向量库；`paper ask` 检索相关段落并生成**带出处（章节）的回答**。
 
 ```bash
-# 跨论文检索
+# 默认检索最近入库的论文
 paper ask "Infini-attention 如何工作？"
 
-# 限定单篇追问
-paper ask "方法的局限是什么？" --paper <id>
+# 指定论文 ID 或标题，检索之前的论文
+paper ask "方法的局限是什么？" --paper 2404.07143
+paper ask "方法的局限是什么？" --paper "Retentive Network"
 
 # 批量灌库（不运行摘要，只写入向量库）
 paper import paper1.pdf paper2.pdf 2404.07143
