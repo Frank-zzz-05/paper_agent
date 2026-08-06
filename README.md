@@ -2,7 +2,7 @@
 
 # 📄 Paper Agent
 
-**论文阅读智能体 — LangGraph + DeepSeek**
+**论文阅读智能体 — LangGraph + 多模型 LLM**
 
 输入论文来源，自动输出**中文摘要 + 要点**与**结构化信息抽取**（研究问题 / 方法 / 数据集 / 实验结果 / 局限 / 贡献 / 核心创新点 / 结论），并可基于向量库对已入库论文做 **RAG 问答**。
 
@@ -13,6 +13,7 @@
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![LangGraph](https://img.shields.io/badge/LangGraph-graph-orange.svg)](https://www.langchain.com/langgraph)
 [![DeepSeek](https://img.shields.io/badge/DeepSeek-LLM-4B5563.svg)](https://www.deepseek.com/)
+[![OpenAI](https://img.shields.io/badge/OpenAI-compatible-fff.svg)](https://openai.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 </div>
@@ -113,19 +114,50 @@ paper clear-cache
 
 ## ⚙️ 配置（`.env`）
 
+复制 `.env.example` 为 `.env`，填好密钥。
+
+### 选择 LLM 后端
+
+通过 `LLM_PROVIDER` 切换，支持多种模型：
+
+| `LLM_PROVIDER` | 后端 | 使用的环境变量 |
+|---|---|---|
+| `deepseek`（默认） | DeepSeek | `DEEPSEEK_API_KEY` `DEEPSEEK_API_BASE` `DEEPSEEK_MODEL` |
+| `openai` | OpenAI | `OPENAI_API_KEY` `OPENAI_API_BASE` `OPENAI_MODEL` |
+| `anthropic` | Anthropic Claude | `ANTHROPIC_API_KEY` `ANTHROPIC_MODEL` |
+| `openai_compatible` | 任意 OpenAI 兼容服务（Qwen/GLM/Moonshot/Ollama 等） | `OPENAI_API_KEY` `OPENAI_API_BASE` `OPENAI_MODEL` |
+
 ```ini
-DEEPSEEK_API_KEY=...                    # 必填
-DEEPSEEK_API_BASE=https://api.deepseek.com/v1   # ChatDeepSeek 读取此变量（非 DEEPSEEK_BASE_URL）
-LANGCHAIN_API_KEY=lsv2_...              # LangSmith 可选（免费）
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_PROJECT=paper_agent
+# 默认 DeepSeek
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_API_BASE=https://api.deepseek.com   # 官方推荐，不加 /v1
+
+# 例：切换阿里云百炼 Qwen
+# LLM_PROVIDER=openai_compatible
+# OPENAI_API_KEY=sk-...
+# OPENAI_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
+# OPENAI_MODEL=qwen-plus
+
+# 例：本地 Ollama
+# LLM_PROVIDER=openai_compatible
+# OPENAI_API_KEY=ollama
+# OPENAI_API_BASE=http://localhost:11434/v1
+# OPENAI_MODEL=qwen2.5:7b
+
+# LangSmith 遥测（可选）
+# LANGCHAIN_API_KEY=lsv2_...
+# LANGCHAIN_TRACING_V2=true
+# LANGCHAIN_PROJECT=paper_agent
 ```
+
+> **关于 `DEEPSEEK_API_BASE`**：DeepSeek 官方推荐 `https://api.deepseek.com`（不加 `/v1`）。`/v1` 只是为兼容 OpenAI SDK 提供的路径别名，与模型/API 版本无关；LangChain 的 `ChatDeepSeek` 会自行拼接请求路径，故不加 `/v1` 更正确。
 
 ## 🏗️ 架构
 
 - **加载器** `paper_agent/loaders/`：本地 PDF（pypdf）/ arXiv（委托 `arxiv_mcp.core`，无重复代码）/ 网页（httpx + BeautifulSoup）
 - **图** `paper_agent/graph/`：LangGraph 静态图 `load → summarize ∥ extract → finalize`（并行分支）
-- **LLM** `paper_agent/llm.py`：DeepSeek `deepseek-chat`，结构化输出带 function_calling → json_mode → 手动解析三级降级
+- **LLM** `paper_agent/llm.py`：多后端工厂（DeepSeek / OpenAI / Anthropic / OpenAI 兼容），结构化输出带 function_calling → json_mode → 手动解析三级降级
 - **CLI** `paper_agent/cli.py`：typer 命令 `read / list / show / clear-cache / ask / import`
 - **缓存** `paper_agent/cache.py`：`data/cache.json` 磁盘缓存，重复读取命中
 - **RAG** `paper_agent/{chunk,vectorstore}.py` + `graph/rag_*.py`：bge-m3 本地 GPU embedding + ChromaDB 向量库

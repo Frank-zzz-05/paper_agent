@@ -55,7 +55,7 @@ def summarize(state: AgentState) -> dict:
     lang = state["options"].get("lang", "zh")
     text = _head(paper.text, config.SUMMARY_TRUNCATE_CHARS)
     try:
-        llm = get_llm(temperature=config.DEEPSEEK_TEMPERATURE_SUMMARY)
+        llm = get_llm(temperature=config.LLM_TEMPERATURE_SUMMARY)
         summary = structured_invoke(
             llm,
             PaperSummary,
@@ -75,7 +75,7 @@ def extract(state: AgentState) -> dict:
     lang = state["options"].get("lang", "zh")
     text = _head_tail(paper.text, config.MAX_LLM_CHARS)
     try:
-        llm = get_llm(temperature=config.DEEPSEEK_TEMPERATURE_EXTRACT)
+        llm = get_llm(temperature=config.LLM_TEMPERATURE_EXTRACT)
         extraction = structured_invoke(
             llm,
             PaperExtraction,

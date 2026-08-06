@@ -1,7 +1,14 @@
-"""全局配置：加载 .env、定义常量。
+"""全局配置：加载 .env、定义常量（支持多模型后端）。
 
-注意：`ChatDeepSeek` 读取的是环境变量 `DEEPSEEK_API_BASE`（默认
-`https://api.deepseek.com/v1`），`.env` 中的 `DEEPSEEK_BASE_URL` 会被忽略。
+通过环境变量 `LLM_PROVIDER` 选择 LLM 后端：
+- `deepseek`（默认）：DeepSeek，`langchain_deepseek.ChatDeepSeek`
+- `openai`：OpenAI，`langchain_openai.ChatOpenAI`
+- `anthropic`：Anthropic Claude，`langchain_anthropic.ChatAnthropic`
+- `openai_compatible`：任意 OpenAI 兼容服务（Qwen/GLM/Moonshot/Ollama 等），
+  用 `OPENAI_API_BASE` + `OPENAI_MODEL` 指定。
+
+结构化输出降级链（function_calling → json_mode → 手动解析）对
+所有后端通用，见 llm.py。
 """
 
 from __future__ import annotations
@@ -17,15 +24,29 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # 加载 .env（存在才加载，不覆盖已设置的环境变量）
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 
+# ---- LLM 后端选择 ----
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "deepseek").strip().lower()
+
+# ---- 通用 LLM 参数 ----
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "4096"))
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "60"))
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "3"))
+LLM_TEMPERATURE_SUMMARY = 0.3
+LLM_TEMPERATURE_EXTRACT = 0.0
+
 # ---- DeepSeek ----
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
+DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-DEEPSEEK_TEMPERATURE_SUMMARY = 0.3
-DEEPSEEK_TEMPERATURE_EXTRACT = 0.0
-DEEPSEEK_MAX_TOKENS = 4096
-DEEPSEEK_TIMEOUT = 60.0
-DEEPSEEK_MAX_RETRIES = 3
+
+# ---- OpenAI（含 openai_compatible） ----
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+
+# ---- Anthropic ----
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 
 # ---- Token 预算 ----
 # deepseek-chat 上下文 64K；估算 len(text)//3（粗估，偏保守），为输出预留 → 输入上限 50K
