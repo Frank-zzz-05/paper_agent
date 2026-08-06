@@ -1,0 +1,83 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 1936 >>
+stream
+BT
+/F1 11 Tf
+54 738 Td
+17 TL
+(Attention Is All You Need: A Novel Transformer Architecture for Sequence Modeling) Tj
+T*
+T*
+(Abstract: We propose the Transformer, a novel architecture based solely on attention mechani) Tj
+T*
+(sms, dispensing with recurrence and convolutions entirely. Unlike recurrent models that proc) Tj
+T*
+(ess tokens sequentially, the Transformer processes all positions in parallel and computes re) Tj
+T*
+(lationships between any two positions with a constant number of operations.) Tj
+T*
+T*
+(Introduction: Sequence transduction models have traditionally relied on recurrent or convolu) Tj
+T*
+(tional networks. However, their sequential nature inhibits parallelization and makes long-ra) Tj
+T*
+(nge dependencies difficult to capture. The core innovation of our work is replacing the recu) Tj
+T*
+(rrence entirely with multi-head self-attention.) Tj
+T*
+T*
+(Method: The Transformer uses an encoder-decoder structure. Each layer applies multi-head sel) Tj
+T*
+(f-attention followed by position-wise feed-forward networks, with residual connections and l) Tj
+T*
+(ayer normalization. We introduce sinusoidal positional encodings to inject order information) Tj
+T*
+(. Scaled dot-product attention is computed as softmax\(QK^T/sqrt\(dk\)\)V.) Tj
+T*
+T*
+(Experiments: We train on the WMT 2014 English-to-German and English-to-French translation ta) Tj
+T*
+(sks. Our model achieves a BLEU score of 28.4 on En-De, surpassing the previous best results ) Tj
+T*
+(while requiring significantly less training time than recurrent baselines. We also evaluate ) Tj
+T*
+(on English constituency parsing with good results.) Tj
+T*
+T*
+(Conclusion: The Transformer is the first transduction model relying entirely on self-attenti) Tj
+T*
+(on, and it can be trained significantly faster than architectures based on recurrent or conv) Tj
+T*
+(olutional layers. We hope this work encourages more attention-based models across the field.) Tj
+T*
+T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000002235 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+2305
+%%EOF

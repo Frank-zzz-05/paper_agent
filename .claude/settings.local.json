@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx -y skills find build-mcp-server --limit 5)",
+      "Bash(npx -y skills find build-mcp-app --limit 5)",
+      "Bash(npx -y skills find build-mcpb --limit 5)",
+      "Bash(npx -y skills add anthropics/claude-plugins-official@build-mcp-server -y)",
+      "Bash(npx -y skills add anthropics/claude-plugins-official@build-mcp-app -y)",
+      "Bash(npx -y skills add anthropics/claude-plugins-official@build-mcpb -y)",
+      "Bash(rtk ls *)",
+      "Bash(E:/Miniconda/envs/langchain/python.exe -c \"import langchain,langgraph,langchain_deepseek,pypdf,typer,langsmith; print\\('deps ok'\\)\")",
+      "Bash(E:/Miniconda/envs/langchain/python.exe -m paper_agent.cli --help)",
+      "Bash(mkdir -p tests/data)",
+      "Bash(E:/Miniconda/envs/langchain/python.exe -c ' *)",
+      "Bash(E:/Miniconda/envs/langchain/python.exe tests/make_sample_pdf.py)",
+      "Bash(E:/Miniconda/envs/langchain/python.exe -m paper_agent.cli read tests/data/sample.pdf --output json)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(E:/Miniconda/envs/langchain/python.exe -m paper_agent.cli read 2404.07143 --no-summary --no-extract)",
+      "Bash(E:/Miniconda/envs/langchain/python.exe -m paper_agent.cli read 2404.07143 --no-summary --no-extract --no-cache)"
+    ]
+  },
+  "enabledMcpjsonServers": [
+    "arxiv"
+  ],
+  "enableAllProjectMcpServers": true
+}

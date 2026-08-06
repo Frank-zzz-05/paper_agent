@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paper-agent"
+version = "0.1.0"
+description = "论文阅读智能体：LangGraph + DeepSeek 命令行实现（摘要/要点 + 结构化信息抽取）"
+requires-python = ">=3.12"
+
+[project.scripts]
+paper = "paper_agent.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["paper_agent*", "arxiv_mcp*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
