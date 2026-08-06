@@ -19,3 +19,6 @@ venv/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 本机开发配置（含绝对路径/权限白名单，勿提交）
+.claude/
