@@ -9,10 +9,6 @@ from typing import Optional
 import typer
 
 from paper_agent import cache, config
-from paper_agent.graph.build import build_paper_graph
-from paper_agent.graph.rag_build import build_rag_graph
-from paper_agent.graph.rag_nodes import RAGState
-from paper_agent.loaders import cache_id_for, load_paper
 from paper_agent.models import PaperExtraction, PaperSummary
 
 app = typer.Typer(
@@ -122,6 +118,9 @@ def read(
     no_cache: bool = typer.Option(False, "--no-cache", help="忽略缓存，强制重新分析"),
 ):
     """阅读一篇论文：加载 → 摘要+要点 → 结构化信息。"""
+    # 懒加载（避免导入 transformers/langchain 拖慢其它命令）
+    from paper_agent.loaders_id import cache_id_for
+
     lang = _validate_lang(lang)
     if output not in ("text", "json"):
         raise _fatal(f"无效 --output: {output!r}（可选 text/json）")
@@ -148,7 +147,9 @@ def read(
                 _print_text(meta, csum if need_summary else None, cext if need_extract else None)
             return
 
-    # 执行图（只跑缓存缺失的部分）
+    # 执行图（只跑缓存缺失的部分）——懒加载，缓存命中路径不导入重依赖
+    from paper_agent.graph.build import build_paper_graph
+
     options = {
         "summary": need_summary and (entry is None or not entry.get("summary")),
         "extract": need_extract and (entry is None or not entry.get("extraction")),
@@ -228,10 +229,71 @@ def show(paper_id: str = typer.Argument(..., help="论文 ID（见 paper list）
 
 
 @app.command("clear-cache")
-def clear_cache():
-    """清空论文缓存。"""
+def clear_cache(
+    keep_vectorstore: bool = typer.Option(False, "--keep-vectorstore", help="只清缓存，保留向量库"),
+):
+    """清空论文缓存，并同时清空向量库（避免两处数据漂移）。"""
     n = cache.clear()
     typer.echo(f"已清除 {n} 条缓存")
+    if keep_vectorstore:
+        typer.echo("  （按 --keep-vectorstore 保留向量库）")
+        return
+    try:
+        from paper_agent import vectorstore as vs
+        vn = vs.clear_all()
+        typer.echo(f"已清空向量库（{vn} 个块）")
+    except ImportError as exc:
+        typer.secho(f"  ⚠ 未清空向量库: 缺少 RAG 依赖: {exc}", fg=typer.colors.YELLOW)
+
+
+@app.command("delete")
+def delete(
+    ref: str = typer.Argument(..., help="要删除的论文 ID 或标题"),
+):
+    """从缓存和向量库中彻底删除某篇论文。"""
+    try:
+        from paper_agent import vectorstore as vs
+    except ImportError as exc:
+        raise _fatal(f"缺少 RAG 依赖: {exc}\n请运行: pip install sentence-transformers chromadb langchain-chroma")
+
+    cache_entries = cache.list_entries()
+    try:
+        stored_ids = set(vs.get_stored_paper_ids())
+    except Exception:
+        stored_ids = set()
+
+    # 解析引用：优先精确 ID，其次标题子串匹配
+    resolved = None
+    title = ""
+    if ref in stored_ids or cache.get(ref) is not None:
+        resolved = ref
+    else:
+        for e in cache_entries:
+            t = e.get("meta", {}).get("title") or ""
+            if ref.lower() in t.lower():
+                resolved = e["id"]
+                title = t
+                break
+
+    if resolved is None:
+        raise _fatal(f"找不到论文 {ref!r}（缓存和向量库中均无匹配）")
+
+    # 记录标题（删除前）
+    if not title:
+        entry = cache.get(resolved)
+        title = (entry or {}).get("meta", {}).get("title", "") if entry else ""
+
+    removed_vs = resolved in stored_ids
+    if removed_vs:
+        vs.delete_paper(resolved)
+    removed_cache = cache.delete(resolved)
+
+    typer.secho(
+        f"✔ 已删除论文 {resolved}: {title or '?'}",
+        fg=typer.colors.GREEN,
+    )
+    typer.echo(f"  - 向量库: {'已删除' if removed_vs else '无此论文（未处理）'}")
+    typer.echo(f"  - 缓存:   {'已删除' if removed_cache else '无此条目（未处理）'}")
 
 
 def _resolve_paper_ref(ref: str, stored_ids: set[str], entries: list[dict]) -> str | None:
@@ -265,6 +327,8 @@ def ask(
 
     默认问答范围是最近入库的一篇论文；用 --paper 指定 ID 或标题可检索之前的论文。
     """
+    from paper_agent.graph.rag_build import build_rag_graph
+    from paper_agent.graph.rag_nodes import RAGState
     try:
         from paper_agent.vectorstore import get_stored_paper_ids
     except ImportError as exc:
@@ -334,6 +398,7 @@ def import_papers(
     inputs: list[str] = typer.Argument(..., help="要导入的论文（PDF 路径/arXiv ID/URL，可多个）"),
 ):
     """批量导入论文到向量库（不运行摘要/抽取，仅入库）。"""
+    from paper_agent.loaders import load_paper
     try:
         from paper_agent import vectorstore as vs
     except ImportError as exc:

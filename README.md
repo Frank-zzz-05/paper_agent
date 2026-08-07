@@ -103,7 +103,12 @@ paper import paper1.pdf paper2.pdf 2404.07143
 # 缓存管理
 paper list
 paper show <id>
-paper clear-cache
+paper clear-cache            # 清缓存 + 向量库（避免两处漂移）
+paper clear-cache --keep-vectorstore   # 只清缓存，保留向量库
+
+# 彻底删除某篇论文（缓存 + 向量库，删除后 ask 检索不到）
+paper delete <id>
+paper delete "Retentive Network"   # 也支持按标题匹配
 ```
 
 | 技术点 | 方案 |
@@ -159,7 +164,7 @@ DEEPSEEK_API_BASE=https://api.deepseek.com   # 官方推荐，不加 /v1
 - **加载器** `paper_agent/loaders/`：本地 PDF（pypdf）/ arXiv（委托 `arxiv_mcp.core`，无重复代码）/ 网页（httpx + BeautifulSoup）
 - **图** `paper_agent/graph/`：LangGraph 静态图 `load → summarize ∥ extract → finalize`（并行分支）
 - **LLM** `paper_agent/llm.py`：多后端工厂（DeepSeek / OpenAI / Anthropic / OpenAI 兼容），结构化输出带 function_calling → json_mode → 手动解析三级降级
-- **CLI** `paper_agent/cli.py`：typer 命令 `read / list / show / clear-cache / ask / import`
+- **CLI** `paper_agent/cli.py`：typer 命令 `read / list / show / clear-cache / delete / ask / import`
 - **缓存** `paper_agent/cache.py`：`data/cache.json` 磁盘缓存，重复读取命中
 - **RAG** `paper_agent/{chunk,vectorstore}.py` + `graph/rag_*.py`：bge-m3 本地 GPU embedding + ChromaDB 向量库
 

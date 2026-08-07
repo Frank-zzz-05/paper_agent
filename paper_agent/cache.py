@@ -66,6 +66,16 @@ def list_entries(limit: int | None = None) -> list[dict]:
     return entries[:limit] if limit else entries
 
 
+def delete(paper_id: str) -> bool:
+    """从缓存中删除某篇论文。返回是否实际删除。"""
+    data = _read()
+    if paper_id not in data:
+        return False
+    del data[paper_id]
+    _write(data)
+    return True
+
+
 def clear() -> int:
     data = _read()
     count = len(data)

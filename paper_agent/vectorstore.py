@@ -203,6 +203,19 @@ def get_stored_paper_ids() -> list[str]:
     return sorted(ids_set)
 
 
+def clear_all() -> int:
+    """清空向量库全部论文。返回删除的块数。"""
+    vs = get_vectorstore()
+    try:
+        results = vs.get(include=[])
+        ids = results.get("ids", [])
+        if ids:
+            vs.delete(ids=ids)
+        return len(ids)
+    except Exception:
+        return 0
+
+
 def get_paper_chunk_count(paper_id: str) -> int:
     """获取某篇论文的块数。"""
     vs = get_vectorstore()
