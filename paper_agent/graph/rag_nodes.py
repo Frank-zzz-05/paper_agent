@@ -31,6 +31,7 @@ class RAGState(TypedDict):
     paper_id: str | None        # None = 跨论文检索
     max_context_chars: int
     context: str                # 拼接后的检索上下文
+    history: str                # 多轮对话历史段（§12，空串 = 无历史）
     sources: list[dict]         # [{section, title, paper_id, excerpt}, ...]
     answer: str
     errors: list[str]
@@ -144,9 +145,18 @@ def answer_node(state: RAGState) -> dict:
     _progress("生成回答…")
     question = state["question"]
     context = state["context"]
+    history = state.get("history") or ""
 
     system = _RAG_SYSTEM_ZH  # 默认中文
-    human = f"论文片段：\n\n{context}\n\n问题：{question}\n\n请基于以上论文片段回答问题，并标注出处。"
+    if history:
+        human = (
+            f"对话历史（前几轮问答，供参考）：\n{history}\n\n"
+            f"论文片段：\n\n{context}\n\n"
+            f"问题：{question}\n\n"
+            f"请结合对话历史与论文片段回答当前问题，并标注出处。"
+        )
+    else:
+        human = f"论文片段：\n\n{context}\n\n问题：{question}\n\n请基于以上论文片段回答问题，并标注出处。"
 
     try:
         llm = get_llm(temperature=0.3)

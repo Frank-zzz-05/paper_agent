@@ -42,6 +42,7 @@ paper_agent/
 │   ├── llm.py              # DeepSeek 调用（function_calling → json 降级）
 │   ├── cache.py            # 磁盘缓存
 │   ├── chunk.py            # 结构优先分块
+│   ├── conversations.py    # 多轮对话历史（按论文隔离 + 两级压缩）
 │   └── vectorstore.py      # ChromaDB 向量库
 ├── arxiv_mcp/              # arXiv MCP server（FastMCP）
 ├── tests/                  # 离线单测
@@ -97,13 +98,24 @@ paper ask "Infini-attention 如何工作？"
 paper ask "方法的局限是什么？" --paper 2404.07143
 paper ask "方法的局限是什么？" --paper "Retentive Network"
 
+# 多轮对话：同一篇论文的追问自动带上此前问答（按 token 预算压缩）
+paper ask "摘要里说的方法是什么？" --paper 2404.07143
+paper ask "它的核心创新点呢？"      --paper 2404.07143   # 自动引用上一问
+paper ask "开始新对话" --paper 2404.07143 --reset       # 清空该篇历史
+paper ask "不带历史问一句" --no-history
+
 # 批量灌库（不运行摘要，只写入向量库）
 paper import paper1.pdf paper2.pdf 2404.07143
 
 # 缓存管理
 paper list
 paper show <id>
-paper clear-cache
+paper clear-cache            # 清缓存 + 向量库（避免两处漂移）
+paper clear-cache --keep-vectorstore   # 只清缓存，保留向量库
+
+# 彻底删除某篇论文（缓存 + 向量库，删除后 ask 检索不到）
+paper delete <id>
+paper delete "Retentive Network"   # 也支持按标题匹配
 ```
 
 | 技术点 | 方案 |
@@ -159,9 +171,10 @@ DEEPSEEK_API_BASE=https://api.deepseek.com   # 官方推荐，不加 /v1
 - **加载器** `paper_agent/loaders/`：本地 PDF（pypdf）/ arXiv（委托 `arxiv_mcp.core`，无重复代码）/ 网页（httpx + BeautifulSoup）
 - **图** `paper_agent/graph/`：LangGraph 静态图 `load → summarize ∥ extract → finalize`（并行分支）
 - **LLM** `paper_agent/llm.py`：多后端工厂（DeepSeek / OpenAI / Anthropic / OpenAI 兼容），结构化输出带 function_calling → json_mode → 手动解析三级降级
-- **CLI** `paper_agent/cli.py`：typer 命令 `read / list / show / clear-cache / ask / import`
+- **CLI** `paper_agent/cli.py`：typer 命令 `read / list / show / clear-cache / delete / ask / import`
 - **缓存** `paper_agent/cache.py`：`data/cache.json` 磁盘缓存，重复读取命中
 - **RAG** `paper_agent/{chunk,vectorstore}.py` + `graph/rag_*.py`：bge-m3 本地 GPU embedding + ChromaDB 向量库
+- **多轮对话** `paper_agent/conversations.py`：按论文隔离的磁盘历史 + token 预算两级压缩（滑动窗口 + LLM 滚动摘要）
 
 ## 🧪 测试
 

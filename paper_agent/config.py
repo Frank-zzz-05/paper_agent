@@ -60,6 +60,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 PDF_DIR = DATA_DIR / "pdfs"
 CACHE_FILE = DATA_DIR / "cache.json"
 VECTORSTORE_DIR = DATA_DIR / "vectorstore"
+CONVERSATIONS_DIR = DATA_DIR / "conversations"
 
 # ---- RAG / Embedding ----
 # BAAI/bge-m3：多语言（中英）、1024 维、输入上限 8192 token
@@ -75,3 +76,10 @@ RAG_FETCH_K = 10          # 实际获取块数（去重/合并后取 top_k）
 # RAG 回答 token 预算
 RAG_MAX_CONTEXT_CHARS = 12_000   # 检索上下文上限（≈4K token）
 RAG_LLM_MAX_TOKENS = 2048        # 回答最大 token
+
+# ---- 多轮对话上下文（development-plan §12） ----
+# 历史按 paper_id 隔离，磁盘持久化 data/conversations/{paper_id}.json
+RAG_HISTORY_MAX_TOKENS = 4000            # 历史段 token 预算（≈8K 字符）
+RAG_HISTORY_MAX_CHARS = RAG_HISTORY_MAX_TOKENS * 3  # ≈8000 字符
+RAG_HISTORY_MAX_TURNS = 6                # 滑动窗口：保留最近 6 轮（3 问 3 答）原文
+RAG_HISTORY_COMPRESS_THRESHOLD = 0.85    # 高水位：历史占用达预算 85% 即主动压缩，留 15% 余量

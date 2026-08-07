@@ -9,10 +9,6 @@ from typing import Optional
 import typer
 
 from paper_agent import cache, config
-from paper_agent.graph.build import build_paper_graph
-from paper_agent.graph.rag_build import build_rag_graph
-from paper_agent.graph.rag_nodes import RAGState
-from paper_agent.loaders import cache_id_for, load_paper
 from paper_agent.models import PaperExtraction, PaperSummary
 
 app = typer.Typer(
@@ -46,6 +42,28 @@ def _auto_ingest(*, paper_id: str, text: str, title: str, authors: list[str], ab
         )
     except Exception:
         pass  # 向量库入库失败不阻塞 read 主流程
+
+
+def _condense_history(text: str) -> str:
+    """LLM 滚动摘要（§12 Tier B）：把超预算的旧对话压缩成一段摘要。
+
+    失败时返回空串，调用方降级为直接丢弃旧轮。
+    """
+    try:
+        from paper_agent.llm import get_llm
+    except Exception:
+        return ""
+    try:
+        llm = get_llm(temperature=0.3)
+        resp = llm.invoke([
+            {"role": "system", "content":
+             "你是对话历史压缩器。请把下面的多轮对话压缩成一段简洁的中文摘要，"
+             "保留关键问题、已确认的论文信息与结论，去除寒暄和重复。直接输出摘要，不要解释。"},
+            {"role": "user", "content": text},
+        ])
+        return resp.content.strip() if hasattr(resp, "content") else str(resp).strip()
+    except Exception:
+        return ""
 
 
 def _entry_models(entry: dict) -> tuple[dict, Optional[PaperSummary], Optional[PaperExtraction]]:
@@ -122,6 +140,9 @@ def read(
     no_cache: bool = typer.Option(False, "--no-cache", help="忽略缓存，强制重新分析"),
 ):
     """阅读一篇论文：加载 → 摘要+要点 → 结构化信息。"""
+    # 懒加载（避免导入 transformers/langchain 拖慢其它命令）
+    from paper_agent.loaders_id import cache_id_for
+
     lang = _validate_lang(lang)
     if output not in ("text", "json"):
         raise _fatal(f"无效 --output: {output!r}（可选 text/json）")
@@ -148,7 +169,9 @@ def read(
                 _print_text(meta, csum if need_summary else None, cext if need_extract else None)
             return
 
-    # 执行图（只跑缓存缺失的部分）
+    # 执行图（只跑缓存缺失的部分）——懒加载，缓存命中路径不导入重依赖
+    from paper_agent.graph.build import build_paper_graph
+
     options = {
         "summary": need_summary and (entry is None or not entry.get("summary")),
         "extract": need_extract and (entry is None or not entry.get("extraction")),
@@ -228,10 +251,79 @@ def show(paper_id: str = typer.Argument(..., help="论文 ID（见 paper list）
 
 
 @app.command("clear-cache")
-def clear_cache():
-    """清空论文缓存。"""
+def clear_cache(
+    keep_vectorstore: bool = typer.Option(False, "--keep-vectorstore", help="只清缓存，保留向量库"),
+):
+    """清空论文缓存，并同时清空向量库与对话历史（避免数据漂移与残留）。"""
+    from paper_agent import conversations
+
     n = cache.clear()
     typer.echo(f"已清除 {n} 条缓存")
+    if keep_vectorstore:
+        typer.echo("  （按 --keep-vectorstore 保留向量库与对话历史）")
+        return
+    try:
+        from paper_agent import vectorstore as vs
+        vn = vs.clear_all()
+        typer.echo(f"已清空向量库（{vn} 个块）")
+    except ImportError as exc:
+        typer.secho(f"  ⚠ 未清空向量库: 缺少 RAG 依赖: {exc}", fg=typer.colors.YELLOW)
+    cn = conversations.clear_all()
+    if cn:
+        typer.echo(f"已清空对话历史（{cn} 篇）")
+
+
+@app.command("delete")
+def delete(
+    ref: str = typer.Argument(..., help="要删除的论文 ID 或标题"),
+):
+    """从缓存和向量库中彻底删除某篇论文（含其对话历史）。"""
+    from paper_agent import conversations
+    try:
+        from paper_agent import vectorstore as vs
+    except ImportError as exc:
+        raise _fatal(f"缺少 RAG 依赖: {exc}\n请运行: pip install sentence-transformers chromadb langchain-chroma")
+
+    cache_entries = cache.list_entries()
+    try:
+        stored_ids = set(vs.get_stored_paper_ids())
+    except Exception:
+        stored_ids = set()
+
+    # 解析引用：优先精确 ID，其次标题子串匹配
+    resolved = None
+    title = ""
+    if ref in stored_ids or cache.get(ref) is not None:
+        resolved = ref
+    else:
+        for e in cache_entries:
+            t = e.get("meta", {}).get("title") or ""
+            if ref.lower() in t.lower():
+                resolved = e["id"]
+                title = t
+                break
+
+    if resolved is None:
+        raise _fatal(f"找不到论文 {ref!r}（缓存和向量库中均无匹配）")
+
+    # 记录标题（删除前）
+    if not title:
+        entry = cache.get(resolved)
+        title = (entry or {}).get("meta", {}).get("title", "") if entry else ""
+
+    removed_vs = resolved in stored_ids
+    if removed_vs:
+        vs.delete_paper(resolved)
+    removed_cache = cache.delete(resolved)
+    removed_conv = conversations.clear(resolved)
+
+    typer.secho(
+        f"✔ 已删除论文 {resolved}: {title or '?'}",
+        fg=typer.colors.GREEN,
+    )
+    typer.echo(f"  - 向量库:   {'已删除' if removed_vs else '无此论文（未处理）'}")
+    typer.echo(f"  - 缓存:     {'已删除' if removed_cache else '无此条目（未处理）'}")
+    typer.echo(f"  - 对话历史: {'已删除' if removed_conv else '无（未处理）'}")
 
 
 def _resolve_paper_ref(ref: str, stored_ids: set[str], entries: list[dict]) -> str | None:
@@ -260,11 +352,17 @@ def ask(
         help="限定某篇论文（ID 或标题，不指定则默认检索最近入库的一篇）",
     ),
     top_k: int = typer.Option(5, "--top-k", "-k", help="检索块数"),
+    reset: bool = typer.Option(False, "--reset", help="清空该篇论文的对话历史后开始新对话"),
+    no_history: bool = typer.Option(False, "--no-history", help="本次问答不使用对话历史"),
 ):
     """基于已入库论文进行问答（RAG）：检索相关段落 + 生成带出处回答。
 
     默认问答范围是最近入库的一篇论文；用 --paper 指定 ID 或标题可检索之前的论文。
+    同一篇论文的多次问答共享多轮对话历史（自动拼入前几轮，按 token 预算压缩）。
     """
+    from paper_agent.graph.rag_build import build_rag_graph
+    from paper_agent.graph.rag_nodes import RAGState
+    from paper_agent import conversations
     try:
         from paper_agent.vectorstore import get_stored_paper_ids
     except ImportError as exc:
@@ -296,11 +394,26 @@ def ask(
             typer.secho(f"→ 默认检索最近入库的论文: {latest_id}", fg=typer.colors.BLUE, err=True)
         paper_id = latest_id
 
+    # ---- 多轮对话历史（§12）：加载 → 滑动窗口 + 滚动摘要 → 拼 prompt ----
+    history_text = ""
+    if not no_history and paper_id:
+        if reset:
+            conversations.clear(paper_id)
+        hist = conversations.get_history(paper_id)
+        if hist["summary"] or hist["turns"]:
+            trimmed = conversations.trim_history(hist, summarize_fn=_condense_history)
+            # 持久化裁剪结果（滚动摘要落盘，供下次使用）
+            conversations.save(paper_id, trimmed)
+            history_text = conversations.format_history(trimmed["summary"], trimmed["turns"])
+            if history_text:
+                typer.secho(f"→ 引用该篇对话历史（{len(hist['turns'])} 轮）", fg=typer.colors.BLUE, err=True)
+
     state: RAGState = {
         "question": question,
         "paper_id": paper_id,
         "max_context_chars": config.RAG_MAX_CONTEXT_CHARS,
         "context": "",
+        "history": history_text,
         "sources": [],
         "answer": "",
         "errors": [],
@@ -316,6 +429,7 @@ def ask(
     answer = result.get("answer", "")
     sources = result.get("sources", [])
 
+    # 先输出回答（不阻塞展示），再整理历史
     typer.echo(answer)
 
     # 显示出处
@@ -328,12 +442,18 @@ def ask(
                 shown.add(key)
                 typer.echo(f"  [{s['title']}] {s['section']}")
 
+    # 问答成功 → 追加本轮并立即按高水位整理（失败/无输出/--no-history 不记录）
+    if not no_history and paper_id and answer.strip():
+        typer.secho("→ 整理对话历史…", fg=typer.colors.BLUE, err=True)
+        conversations.append_turn(paper_id, question, answer.strip(), summarize_fn=_condense_history)
+
 
 @app.command("import")
 def import_papers(
     inputs: list[str] = typer.Argument(..., help="要导入的论文（PDF 路径/arXiv ID/URL，可多个）"),
 ):
     """批量导入论文到向量库（不运行摘要/抽取，仅入库）。"""
+    from paper_agent.loaders import load_paper
     try:
         from paper_agent import vectorstore as vs
     except ImportError as exc:

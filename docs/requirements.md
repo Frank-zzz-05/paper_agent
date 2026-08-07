@@ -66,6 +66,7 @@
 ## 5. 约束与边界（本阶段不做）
 
 - ⏳ **RAG 问答**（`paper ask`）——设计已定稿（development-plan.md §11：bge-m3 + chromadb + 分块管线），尚未实现。
+- ✅ **多轮对话上下文**（`paper ask` 同一论文维护历史）——development-plan.md §12 已实现：按论文隔离 + 磁盘持久化 + token 预算 + 两级压缩（滑动窗口 + LLM 滚动摘要）。
 - ❌ 多论文对比、文献综述。
 - ❌ Web 界面（P6）。
 - ⏳ 向量数据库——方案定稿（chromadb 本地 `data/vectorstore/`），尚未实现；checkpointer 多轮对话、账户/鉴权本阶段不做。

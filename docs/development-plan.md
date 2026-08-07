@@ -217,3 +217,64 @@ START → retrieve（query embedding → 向量检索 top-k，可选 paper_id �
 1. chromadb 默认 embedding 联网下载 → 初始化显式传 `embedding_function`。
 2. bge-m3 下载设 `HF_ENDPOINT=https://hf-mirror.com`。
 3. `data/vectorstore/` 进 gitignore，防止索引文件入库。
+
+### 12. 上下文管理：`paper ask` 多轮对话（✅ 已实现 2026-08-11）
+
+> 决策（2026-08-11）：历史按论文隔离 · 磁盘持久化 · token 预算 + 两级压缩
+
+**实现**：`paper_agent/conversations.py`（存储 + 滑动窗口 + 滚动摘要，纯 stdlib）、`rag_nodes.answer` 拼历史段、CLI `ask` 增加 `--reset` / `--no-history`，`clear-cache` / `delete` 连带清对话历史。86 个 pytest 全绿。
+
+**背景**：当前 `paper ask` 是**单次无状态**问答——每次独立检索、回答后即丢弃，上一问不影响下一问。本计划为**同一篇论文**维护多轮对话历史，把前几轮问答拼进 prompt，让追问能引用前文。
+
+#### 12.1 历史范围：按论文隔离
+
+- 历史以 `paper_id` 为键隔离。`ask` 当前作用域是"最近入库一篇"或 `--paper` 指定篇，历史天然按论文归属。
+- 切换论文 → 历史切换（互不污染）；`--paper` 指定 A 篇不会带出 B 篇前文。
+
+#### 12.2 存储：磁盘持久化（关键约束）
+
+- 每次 `paper ask` 是**独立进程**，内存历史无意义 → 必须落盘。
+- 方案：`data/conversations/{paper_id}.json`，结构 `{"summary": str|None, "turns": [{"role": "user"|"assistant", "content": str}, ...]}`。
+- `data/conversations/` 进 `.gitignore`（与 `data/vectorstore/` 同理）。
+- 命令面：`paper ask <q> [--paper <id>] [--reset]`（`--reset` 清空该篇历史）。
+
+#### 12.3 LLM 侧：历史拼进 answer 节点
+
+- `rag_nodes.answer` 的 prompt 在"检索块 + 出处"之外追加一段 `对话历史`（最近几轮原文）。
+- 检索 `retrieve` 仍只基于**当前问题**（历史不走向量检索，避免噪声），history 仅作为 answer 的上下文。
+
+#### 12.4 预算上限（定稿）
+
+- 预算按 **token** 而非轮数：新增 `RAG_HISTORY_MAX_TOKENS`（默认 **4000**，≈ 8K 字符，`len//3` 估算）。
+- 典型 64K 上下文内：系统 + 当前问题 + 检索块（`RAG_MAX_CONTEXT_CHARS` 默认 8000 字符）+ 历史 4000 token，余量充足。
+- 高水位：`RAG_HISTORY_COMPRESS_THRESHOLD = 0.85` —— 历史占用达预算 **85%** 即主动压缩，留 15% 余量，避免下一轮临时挤爆。
+
+#### 12.5 太长怎么办 —— 两级压缩 + 高水位
+
+| 层 | 触发 | 方法 | 是否调 LLM |
+|---|---|---|---|
+| A 滑动窗口 | 轮数 > 上限（保留最近 6 轮） | 超出的最旧轮次划入待压缩池，只留最近 N 轮原文 | 否（零成本） |
+| B 滚动摘要 | 滑动后占用仍 > **预算 85%（高水位）** | 把"旧摘要 + 待压缩池 + 最旧问答对"折成一句 LLM 滚动摘要，压回高水位之下 | 是（≤1 次调用，高水位门控） |
+
+- 策略：**A 先行的滑动窗口 + B 高水位压缩**。普通问答（占用 < 85%）只走 A，零额外 LLM；逼近 85% 才触发 B，给下一轮留 15% 余量。
+- **立即整理**：每轮回答后 `append_turn` 即跑一次 trim（而非等下一轮），保证任何时刻存储的历史低于高水位。
+- B 的摘要持久化（`summary` 字段）：下次压缩把旧摘要 + 新溢出内容一起压缩 → **滚动摘要**，避免重复压缩已压缩内容。
+- 压缩后提示词结构：`滚动摘要（旧） + 最近 N 轮原文（新）`。
+
+#### 12.6 坑点备忘（新增）
+
+1. 历史拼进 prompt 前要**截断每条 content**（防止单轮超长），复用现有 `MAX_CONTEXT_CHARS` 逻辑。
+2. 清空时机：`paper clear-cache` 清缓存时**连带清 `conversations/`**（一键复位到位），`--keep-vectorstore` 同理；`paper delete <id>` 连带删该篇历史。
+3. 并发：单用户 CLI，无需锁；`_write` 用原子 tmp+replace（与 cache.py 一致）。
+4. 成本护栏：B 摘要仅当历史确实超预算才触发，且摘要输入也受预算截断，防止 prompt 爆炸。
+
+#### 12.7 里程碑与验证
+
+| 子阶段 | 内容 | 验证 |
+|---|---|---|
+| C1 存储 | `conversations.py`（读写/清空）+ gitignore | 两轮 ask 后 `data/conversations/{pid}.json` 有 turns |
+| C2 注入 | answer 节点拼历史 + token 预算 + 滑动窗口 | 追问能引用前文；超长历史只留最近 N 轮 |
+| C3 压缩 | LLM 滚动摘要（仅超预算触发） | 长对话后 prompt 含"旧摘要+新轮次"，`--reset` 清空 |
+| C4 CLI | `--reset` / `--no-history` 开关 | `pytest -q` 全绿 |
+
+**新增依赖**：无（复用现有 LLM；磁盘 JSON 用 stdlib）。
