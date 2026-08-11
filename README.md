@@ -4,7 +4,7 @@
 
 **论文阅读智能体 — LangGraph + 多模型 LLM**
 
-输入论文来源，自动输出**中文摘要 + 要点**与**结构化信息抽取**（研究问题 / 方法 / 数据集 / 实验结果 / 局限 / 贡献 / 核心创新点 / 结论），并可基于向量库对已入库论文做 **RAG 问答**。
+输入论文来源，自动输出**中文摘要 + 要点**与**结构化信息抽取**（研究问题 / 方法 / 数据集 / 实验结果 / 局限 / 贡献 / 核心创新点 / 结论），并可基于向量库对已入库论文做 **RAG 问答**（含多轮对话）。
 
 附带一个 **arXiv MCP server**，让 Claude 直接在对话中检索 / 读取 arXiv 论文。
 
@@ -25,31 +25,13 @@
 - **多来源输入**：本地 PDF（离线）、arXiv ID（自动下载 + 解析元数据）、网页 URL
 - **双阶段 LangGraph 流水线**：`load → summarize ∥ extract → finalize`（并行分支）
 - **结构化抽取**：研究问题 / 方法 / 数据集 / 实验结果 / 局限 / 贡献 / **核心创新点** / 结论
-- **RAG 问答**：bge-m3 多语言 embedding + ChromaDB，带出处（章节）的回答
-- **磁盘缓存**：`data/cache.json`，重复读取命中，可 `--no-cache` 强制刷新
+- **RAG 问答**：bge-m3 多语言 embedding + ChromaDB，回答**带出处**（章节）
+- **多轮对话**：同一论文的追问自动带上此前问答，按高水位（85%）滚动压缩，`--reset` 开新对话
+- **磁盘缓存**：`data/cache.json` 重复读取命中；`--no-cache` 强制刷新
+- **完整生命周期**：`read` 自动入库 / `import` 批量灌库 / `delete` 彻底删除 / `clear-cache` 一键清空
 - **JSON 输出**：`--output json` 供程序化消费
+- **多 LLM 后端**：DeepSeek（默认）/ OpenAI / Anthropic / 任意 OpenAI 兼容服务
 - **arXiv MCP server**：让 Claude 对话中直接检索 / 读取论文
-
-## 📦 目录结构
-
-```
-paper_agent/
-├── paper_agent/            # 核心包
-│   ├── cli.py              # typer 命令行入口
-│   ├── config.py           # 配置 / 常量 / token 预算
-│   ├── loaders/            # 加载器：PDF / arXiv / Web
-│   ├── graph/              # LangGraph 流水线（摘要 / 抽取 / RAG）
-│   ├── llm.py              # DeepSeek 调用（function_calling → json 降级）
-│   ├── cache.py            # 磁盘缓存
-│   ├── chunk.py            # 结构优先分块
-│   ├── conversations.py    # 多轮对话历史（按论文隔离 + 两级压缩）
-│   └── vectorstore.py      # ChromaDB 向量库
-├── arxiv_mcp/              # arXiv MCP server（FastMCP）
-├── tests/                  # 离线单测
-├── docs/                   # 需求与开发计划
-├── .mcp.json               # MCP server 注册
-└── pyproject.toml
-```
 
 ## 🚀 快速开始
 
@@ -72,11 +54,26 @@ paper read "https://www.ruanyifeng.com/blog/2024/01/weekly-issue-286.html"
 
 # 6. JSON 输出（供程序化消费）
 paper read 2404.07143 --output json
+
+# 7. RAG 问答（默认检索最近入库的论文）
+paper ask "这篇论文的核心创新是什么？"
 ```
 
 > 也可不用 `paper` 命令，直接 `python -m paper_agent.cli ...`。
 
-## 🧩 常用选项
+## 📖 命令参考
+
+| 命令 | 说明 |
+|---|---|
+| `paper read <输入>` | 阅读论文：加载 → 摘要+要点 → 结构化抽取 |
+| `paper ask "<问题>"` | RAG 问答，默认检索**最近入库**的论文 |
+| `paper import <输入…>` | 批量入库（不运行摘要，仅写向量库） |
+| `paper list [--limit N]` | 浏览已读论文 |
+| `paper show <ID>` | 查看某篇论文的 JSON 结果 |
+| `paper clear-cache` | 清空缓存 + 向量库 + 对话历史 |
+| `paper delete <ID/标题>` | 彻底删除某篇论文（缓存 + 向量库 + 对话历史） |
+
+### `paper read` 选项
 
 | 选项 | 说明 |
 |---|---|
@@ -86,44 +83,45 @@ paper read 2404.07143 --output json
 | `--lang zh\|en` | 输出语言（默认中文） |
 | `--no-cache` | 忽略缓存强制重新分析（结果仍会更新缓存） |
 
-## 💬 RAG 问答
-
-`paper read` 成功后自动将论文分块写入向量库；`paper ask` 检索相关段落并生成**带出处（章节）的回答**。
+### `paper ask` 选项
 
 ```bash
-# 默认检索最近入库的论文
-paper ask "Infini-attention 如何工作？"
-
-# 指定论文 ID 或标题，检索之前的论文
+# 指定论文（ID 或标题），检索之前的论文
 paper ask "方法的局限是什么？" --paper 2404.07143
 paper ask "方法的局限是什么？" --paper "Retentive Network"
 
-# 多轮对话：同一篇论文的追问自动带上此前问答（按 token 预算压缩）
+# 多轮对话：同一论文的追问自动带上此前问答
 paper ask "摘要里说的方法是什么？" --paper 2404.07143
-paper ask "它的核心创新点呢？"      --paper 2404.07143   # 自动引用上一问
+paper ask "它的核心创新点呢？"      --paper 2404.07143   # 引用上一问
 paper ask "开始新对话" --paper 2404.07143 --reset       # 清空该篇历史
 paper ask "不带历史问一句" --no-history
 
-# 批量灌库（不运行摘要，只写入向量库）
-paper import paper1.pdf paper2.pdf 2404.07143
-
-# 缓存管理
-paper list
-paper show <id>
-paper clear-cache            # 清缓存 + 向量库（避免两处漂移）
-paper clear-cache --keep-vectorstore   # 只清缓存，保留向量库
-
-# 彻底删除某篇论文（缓存 + 向量库，删除后 ask 检索不到）
-paper delete <id>
-paper delete "Retentive Network"   # 也支持按标题匹配
+# 其他
+--top-k N       # 检索块数（默认 5）
 ```
+
+### 缓存 / 删除
+
+```bash
+paper list                                   # 浏览历史
+paper show <id>                              # 回看某篇 JSON
+paper clear-cache                            # 清缓存 + 向量库 + 对话历史（一键复位）
+paper clear-cache --keep-vectorstore         # 只清缓存，保留向量库与历史
+paper delete <id>                            # 彻底删除单篇
+paper delete "Retentive Network"             # 删除也支持按标题匹配
+```
+
+## 💬 RAG 问答（技术细节）
+
+`paper read` 成功后自动将论文分块写入向量库；`paper ask` 检索相关段落并生成**带出处（章节）的回答**。
 
 | 技术点 | 方案 |
 |---|---|
 | Embedding | `BAAI/bge-m3`（中英多语言，1024 维），本地 GPU/CUDA，`HF_ENDPOINT=https://hf-mirror.com` |
 | 向量库 | ChromaDB 本地持久化 `data/vectorstore/`，语义检索 + `paper_id` 元数据过滤 |
 | 分块 | 结构优先（按章节切分，带 section 出处）+ 递归兜底（超长节切分） |
-| 回答 | DeepSeek 生成，**必须标注出处** `[标题, 章节]` |
+| 回答 | LLM 生成，**必须标注出处** `[标题, 章节]` |
+| 多轮对话 | 按 `paper_id` 隔离的磁盘历史，token 预算 + 高水位（85%）两级压缩（滑动窗口 + LLM 滚动摘要） |
 
 ## ⚙️ 配置（`.env`）
 
@@ -168,13 +166,46 @@ DEEPSEEK_API_BASE=https://api.deepseek.com   # 官方推荐，不加 /v1
 
 ## 🏗️ 架构
 
+```
+读论文（read）
+  load → summarize ∥ extract → finalize ──► cache.json（磁盘缓存）
+                                              └─► vectorstore（自动入库）
+RAG 问答（ask）
+  retrieve（bge-m3 embedding + ChromaDB，paper_id 过滤）
+    → answer（检索块 + 对话历史 + 出处 → LLM）
+      └─► conversations/{paper_id}.json（多轮历史，高水位压缩）
+```
+
 - **加载器** `paper_agent/loaders/`：本地 PDF（pypdf）/ arXiv（委托 `arxiv_mcp.core`，无重复代码）/ 网页（httpx + BeautifulSoup）
-- **图** `paper_agent/graph/`：LangGraph 静态图 `load → summarize ∥ extract → finalize`（并行分支）
+- **图** `paper_agent/graph/`：LangGraph 静态图 `load → summarize ∥ extract → finalize`；RAG 子图 `retrieve → answer`
 - **LLM** `paper_agent/llm.py`：多后端工厂（DeepSeek / OpenAI / Anthropic / OpenAI 兼容），结构化输出带 function_calling → json_mode → 手动解析三级降级
-- **CLI** `paper_agent/cli.py`：typer 命令 `read / list / show / clear-cache / delete / ask / import`
+- **CLI** `paper_agent/cli.py`：typer 命令 `read / ask / import / list / show / clear-cache / delete`，重依赖命令内懒加载（`list`/`show` 秒开）
 - **缓存** `paper_agent/cache.py`：`data/cache.json` 磁盘缓存，重复读取命中
 - **RAG** `paper_agent/{chunk,vectorstore}.py` + `graph/rag_*.py`：bge-m3 本地 GPU embedding + ChromaDB 向量库
-- **多轮对话** `paper_agent/conversations.py`：按论文隔离的磁盘历史 + token 预算两级压缩（滑动窗口 + LLM 滚动摘要）
+- **多轮对话** `paper_agent/conversations.py`：按论文隔离的磁盘历史 + 高水位（85%）两级压缩（滑动窗口 + LLM 滚动摘要）
+
+## 📦 目录结构
+
+```
+paper_agent/
+├── paper_agent/            # 核心包
+│   ├── cli.py              # typer 命令行入口
+│   ├── config.py           # 配置 / 常量 / token 预算
+│   ├── loaders/            # 加载器：PDF / arXiv / Web
+│   ├── loaders_id.py       # 轻量 ID 计算（缓存命中预检，不拖重依赖）
+│   ├── graph/              # LangGraph 流水线（摘要 / 抽取 / RAG）
+│   ├── llm.py              # 多后端 LLM 工厂（function_calling → json 降级）
+│   ├── cache.py            # 磁盘缓存
+│   ├── chunk.py            # 结构优先分块
+│   ├── conversations.py    # 多轮对话历史（按论文隔离 + 高水位压缩）
+│   └── vectorstore.py      # ChromaDB 向量库
+├── arxiv_mcp/              # arXiv MCP server（FastMCP）
+├── tests/                  # 离线单测
+├── docs/                   # 需求文档与开发计划
+├── data/                   # 运行时数据（cache.json / pdfs / vectorstore / conversations，已 gitignore）
+├── .mcp.json               # MCP server 注册
+└── pyproject.toml
+```
 
 ## 🧪 测试
 
@@ -212,10 +243,13 @@ python -c "from arxiv_mcp import core; print(core.search_papers('all:rag'))"  # 
 
 ## 🗺️ 路线图
 
-- ✅ P0–P4：加载器 / 摘要 / 结构化抽取（含核心创新点）/ CLI / 缓存 / 测试
-- ✅ arXiv MCP server：检索 / 元数据 / 全文 / 下载四个工具（`arxiv_mcp/`）
-- ✅ P5：RAG 问答 `paper ask`（bge-m3 embedding 本地 GPU + ChromaDB 向量库 + 自动入库）
+- ✅ P0–P2：加载器 / 摘要+要点 / 结构化抽取（含核心创新点）
+- ✅ P3–P4：CLI / 缓存 / 测试 / `--output json`
+- ✅ arXiv MCP server：检索 / 元数据 / 全文 / 下载四工具
+- ✅ P5：RAG 问答 `paper ask`（bge-m3 + ChromaDB + 自动入库 + 多轮对话）
+- ✅ 工程打磨：`paper delete`、`clear-cache` 同步清库、懒加载提速（`list` 11s→0.3s）
 - ⏳ P6：FastAPI Web 界面（SSE 流式）
+- ❌ 一阶段不做：多论文对比 / 文献综述 / 账户鉴权
 
 详细需求与方案见 [docs/requirements.md](docs/requirements.md) 和 [docs/development-plan.md](docs/development-plan.md)。
 
