@@ -248,8 +248,6 @@ python -c "from arxiv_mcp import core; print(core.search_papers('all:rag'))"  # 
 - ✅ arXiv MCP server：检索 / 元数据 / 全文 / 下载四工具
 - ✅ P5：RAG 问答 `paper ask`（bge-m3 + ChromaDB + 自动入库 + 多轮对话）
 - ✅ 工程打磨：`paper delete`、`clear-cache` 同步清库、懒加载提速（`list` 11s→0.3s）
-- ⏳ P6：FastAPI Web 界面（SSE 流式）
-- ❌ 一阶段不做：多论文对比 / 文献综述 / 账户鉴权
 
 详细需求与方案见 [docs/requirements.md](docs/requirements.md) 和 [docs/development-plan.md](docs/development-plan.md)。
 
