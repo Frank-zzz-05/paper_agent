@@ -44,26 +44,36 @@ def _auto_ingest(*, paper_id: str, text: str, title: str, authors: list[str], ab
         pass  # 向量库入库失败不阻塞 read 主流程
 
 
-def _condense_history(text: str) -> str:
-    """LLM 滚动摘要（§12 Tier B）：把超预算的旧对话压缩成一段摘要。
+def _update_memory(existing: dict, question: str, answer: str) -> dict | None:
+    """LLM 结构化记忆更新（§12）：把本轮问答并入 事实/偏好/已回答 槽位。
 
-    失败时返回空串，调用方降级为直接丢弃旧轮。
+    返回新记忆 dict；失败返回 None，调用方安全降级为仅追加 answered。
     """
+    import json
+
     try:
-        from paper_agent.llm import get_llm
+        from paper_agent.llm import get_llm, structured_invoke
+        from paper_agent.models import ConversationMemory
     except Exception:
-        return ""
+        return None
     try:
-        llm = get_llm(temperature=0.3)
-        resp = llm.invoke([
-            {"role": "system", "content":
-             "你是对话历史压缩器。请把下面的多轮对话压缩成一段简洁的中文摘要，"
-             "保留关键问题、已确认的论文信息与结论，去除寒暄和重复。直接输出摘要，不要解释。"},
-            {"role": "user", "content": text},
-        ])
-        return resp.content.strip() if hasattr(resp, "content") else str(resp).strip()
+        llm = get_llm(temperature=0.0)
+        system = (
+            "你是对话记忆整理器。根据已有记忆与新一轮问答，输出更新后的结构化记忆。"
+            "要求：\n"
+            "1. facts：已确认事实（论文信息、结论），合并去重、删除已过时内容；\n"
+            "2. preferences：用户偏好/关注点（反复追问的主题、输出偏好）；\n"
+            "3. answered：已回答问题，保留最近 10 条，合并去重。\n"
+            "全部用中文，简洁。"
+        )
+        human = (
+            f"已有记忆：\n{json.dumps(existing, ensure_ascii=False)}\n\n"
+            f"新问答：\n问：{question}\n答：{answer}"
+        )
+        mem = structured_invoke(llm, ConversationMemory, system, human)
+        return mem.model_dump()
     except Exception:
-        return ""
+        return None
 
 
 def _entry_models(entry: dict) -> tuple[dict, Optional[PaperSummary], Optional[PaperExtraction]]:
@@ -394,19 +404,16 @@ def ask(
             typer.secho(f"→ 默认检索最近入库的论文: {latest_id}", fg=typer.colors.BLUE, err=True)
         paper_id = latest_id
 
-    # ---- 多轮对话历史（§12）：加载 → 滑动窗口 + 滚动摘要 → 拼 prompt ----
+    # ---- 多轮对话记忆（§12）：按相关性选择结构化记忆拼 prompt ----
     history_text = ""
     if not no_history and paper_id:
         if reset:
             conversations.clear(paper_id)
-        hist = conversations.get_history(paper_id)
-        if hist["summary"] or hist["turns"]:
-            trimmed = conversations.trim_history(hist, summarize_fn=_condense_history)
-            # 持久化裁剪结果（滚动摘要落盘，供下次使用）
-            conversations.save(paper_id, trimmed)
-            history_text = conversations.format_history(trimmed["summary"], trimmed["turns"])
-            if history_text:
-                typer.secho(f"→ 引用该篇对话历史（{len(hist['turns'])} 轮）", fg=typer.colors.BLUE, err=True)
+        memory = conversations.get_history(paper_id)
+        history_text = conversations.select_history(memory, question)
+        if history_text:
+            n = len(memory.get("facts", [])) + len(memory.get("preferences", [])) + len(memory.get("answered", []))
+            typer.secho(f"→ 引用该篇对话记忆（{n} 条）", fg=typer.colors.BLUE, err=True)
 
     state: RAGState = {
         "question": question,
@@ -442,10 +449,10 @@ def ask(
                 shown.add(key)
                 typer.echo(f"  [{s['title']}] {s['section']}")
 
-    # 问答成功 → 追加本轮并立即按高水位整理（失败/无输出/--no-history 不记录）
+    # 问答成功 → 结构化记忆更新（失败/无输出/--no-history 不记录）
     if not no_history and paper_id and answer.strip():
-        typer.secho("→ 整理对话历史…", fg=typer.colors.BLUE, err=True)
-        conversations.append_turn(paper_id, question, answer.strip(), summarize_fn=_condense_history)
+        typer.secho("→ 整理对话记忆…", fg=typer.colors.BLUE, err=True)
+        conversations.update_memory(paper_id, question, answer.strip(), _update_memory)
 
 
 @app.command("import")

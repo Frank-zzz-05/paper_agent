@@ -220,61 +220,95 @@ START → retrieve（query embedding → 向量检索 top-k，可选 paper_id �
 
 ### 12. 上下文管理：`paper ask` 多轮对话（✅ 已实现 2026-08-11）
 
-> 决策（2026-08-11）：历史按论文隔离 · 磁盘持久化 · token 预算 + 两级压缩
+> 决策（2026-08-11）：按论文隔离 · 磁盘持久化 · **结构化压缩替代滑动窗口** · 按相关性选择
 
-**实现**：`paper_agent/conversations.py`（存储 + 滑动窗口 + 滚动摘要，纯 stdlib）、`rag_nodes.answer` 拼历史段、CLI `ask` 增加 `--reset` / `--no-history`，`clear-cache` / `delete` 连带清对话历史。86 个 pytest 全绿。
+**实现**：`paper_agent/conversations.py`（结构化记忆：事实/偏好/已回答列表 + 相关性选择）、`rag_nodes.answer` 拼记忆段、CLI `ask` 增加 `--reset` / `--no-history`，`clear-cache` / `delete` 连带清对话记忆。90 个 pytest 全绿。
 
-**背景**：当前 `paper ask` 是**单次无状态**问答——每次独立检索、回答后即丢弃，上一问不影响下一问。本计划为**同一篇论文**维护多轮对话历史，把前几轮问答拼进 prompt，让追问能引用前文。
+**背景**：`paper ask` 原为**单次无状态**问答。为同一篇论文维护多轮记忆，让追问能引用前文。
 
-#### 12.1 历史范围：按论文隔离
+#### 12.1 记忆范围：按论文隔离
 
-- 历史以 `paper_id` 为键隔离。`ask` 当前作用域是"最近入库一篇"或 `--paper` 指定篇，历史天然按论文归属。
-- 切换论文 → 历史切换（互不污染）；`--paper` 指定 A 篇不会带出 B 篇前文。
+- 记忆以 `paper_id` 为键隔离。`ask` 作用域是"最近入库一篇"或 `--paper` 指定篇，记忆天然按论文归属。
+- 切换论文 → 记忆切换（互不污染）；`--paper` 指定 A 篇不会带出 B 篇前文。
 
 #### 12.2 存储：磁盘持久化（关键约束）
 
-- 每次 `paper ask` 是**独立进程**，内存历史无意义 → 必须落盘。
-- 方案：`data/conversations/{paper_id}.json`，结构 `{"summary": str|None, "turns": [{"role": "user"|"assistant", "content": str}, ...]}`。
-- `data/conversations/` 进 `.gitignore`（与 `data/vectorstore/` 同理）。
-- 命令面：`paper ask <q> [--paper <id>] [--reset]`（`--reset` 清空该篇历史）。
+- 每次 `paper ask` 是**独立进程**，内存记忆无意义 → 必须落盘。
+- 方案：`data/conversations/{paper_id}.json`，结构 `{"facts": [...], "preferences": [...], "answered": [{"q","a"}, ...]}`。
+- `data/conversations/` 在 `data/` 下（整体 gitignore）。
+- 命令面：`paper ask <q> [--paper <id>] [--reset]`（`--reset` 清空该篇记忆）。
 
-#### 12.3 LLM 侧：历史拼进 answer 节点
+#### 12.3 结构化压缩（不用滑动窗口）
 
-- `rag_nodes.answer` 的 prompt 在"检索块 + 出处"之外追加一段 `对话历史`（最近几轮原文）。
-- 检索 `retrieve` 仍只基于**当前问题**（历史不走向量检索，避免噪声），history 仅作为 answer 的上下文。
+- **不用滑动窗口、不用滚动摘要**：保留原始轮次是浪费，且"最近 N 轮 + 摘要"割裂语义。
+- 每轮回答后调 LLM 把本轮问答**压缩**进结构化槽位（`ConversationMemory` schema，Pydantic 约束）：
+  - `facts`：已确认事实（论文信息、结论），LLM 合并去重、删除过时；
+  - `preferences`：用户偏好/关注点（反复追问的主题、输出偏好）；
+  - `answered`：已回答问题（保留最近 10 条，Python 侧兜底裁剪）。
+- 更新失败 → 安全降级：仅把本轮追加进 `answered`，不阻塞主流程。
 
-#### 12.4 预算上限（定稿）
+#### 12.4 拼 prompt：按相关性选择，而非全量
 
-- 预算按 **token** 而非轮数：新增 `RAG_HISTORY_MAX_TOKENS`（默认 **4000**，≈ 8K 字符，`len//3` 估算）。
-- 典型 64K 上下文内：系统 + 当前问题 + 检索块（`RAG_MAX_CONTEXT_CHARS` 默认 8000 字符）+ 历史 4000 token，余量充足。
-- 高水位：`RAG_HISTORY_COMPRESS_THRESHOLD = 0.85` —— 历史占用达预算 **85%** 即主动压缩，留 15% 余量，避免下一轮临时挤爆。
+- `rag_nodes.answer` 的 prompt 在"检索块 + 出处"之外追加一段 `记忆`。
+- **选择**：对本轮问题做 tokenize（BM25 同款：英文词 + 中文 bigram），剔除停用词
+  （"什么/怎么/如何/的/了"等），与每条 事实/偏好/已回答 计算 token 重叠；
+  只选重叠 >0 的项，按分数降序累积到 `RAG_HISTORY_MAX_TOKENS`（默认 4000）预算。
+- 无关历史不进入 prompt（不全量拼接）——既省 token 又避免噪声。
 
-#### 12.5 太长怎么办 —— 两级压缩 + 高水位
+#### 12.5 预算
 
-| 层 | 触发 | 方法 | 是否调 LLM |
-|---|---|---|---|
-| A 滑动窗口 | 轮数 > 上限（保留最近 6 轮） | 超出的最旧轮次划入待压缩池，只留最近 N 轮原文 | 否（零成本） |
-| B 滚动摘要 | 滑动后占用仍 > **预算 85%（高水位）** | 把"旧摘要 + 待压缩池 + 最旧问答对"折成一句 LLM 滚动摘要，压回高水位之下 | 是（≤1 次调用，高水位门控） |
-
-- 策略：**A 先行的滑动窗口 + B 高水位压缩**。普通问答（占用 < 85%）只走 A，零额外 LLM；逼近 85% 才触发 B，给下一轮留 15% 余量。
-- **立即整理**：每轮回答后 `append_turn` 即跑一次 trim（而非等下一轮），保证任何时刻存储的历史低于高水位。
-- B 的摘要持久化（`summary` 字段）：下次压缩把旧摘要 + 新溢出内容一起压缩 → **滚动摘要**，避免重复压缩已压缩内容。
-- 压缩后提示词结构：`滚动摘要（旧） + 最近 N 轮原文（新）`。
+- 记忆段 token 预算 `RAG_HISTORY_MAX_TOKENS = 4000`，用 `tokens.estimate_tokens`（tiktoken 精确计数）约束。
+- 检索 `retrieve` 仍只基于**当前问题**（记忆不走向量检索），记忆仅作 answer 上下文。
 
 #### 12.6 坑点备忘（新增）
 
-1. 历史拼进 prompt 前要**截断每条 content**（防止单轮超长），复用现有 `MAX_CONTEXT_CHARS` 逻辑。
-2. 清空时机：`paper clear-cache` 清缓存时**连带清 `conversations/`**（一键复位到位），`--keep-vectorstore` 同理；`paper delete <id>` 连带删该篇历史。
-3. 并发：单用户 CLI，无需锁；`_write` 用原子 tmp+replace（与 cache.py 一致）。
-4. 成本护栏：B 摘要仅当历史确实超预算才触发，且摘要输入也受预算截断，防止 prompt 爆炸。
+1. 相关性选择要**剔除中文停用词**（字符 bigram 会让"什么/是什"等产生假命中）。
+2. 清空时机：`paper clear-cache` **连带清 `conversations/`**，`--keep-vectorstore` 同理；`paper delete <id>` 连带删该篇记忆。
+3. 并发：单用户 CLI，无需锁；`save` 用原子 tmp+replace（与 cache.py 一致）。
+4. 成本护栏：记忆更新是每轮 1 次 LLM 调用（结构化输出），失败静默降级。
 
 #### 12.7 里程碑与验证
 
 | 子阶段 | 内容 | 验证 |
 |---|---|---|
-| C1 存储 | `conversations.py`（读写/清空）+ gitignore | 两轮 ask 后 `data/conversations/{pid}.json` 有 turns |
-| C2 注入 | answer 节点拼历史 + token 预算 + 滑动窗口 | 追问能引用前文；超长历史只留最近 N 轮 |
-| C3 压缩 | LLM 滚动摘要（仅超预算触发） | 长对话后 prompt 含"旧摘要+新轮次"，`--reset` 清空 |
+| C1 存储 | `conversations.py`（读写/清空）+ gitignore | 两轮 ask 后 `data/conversations/{pid}.json` 有 facts/answered |
+| C2 结构化压缩 | `_update_memory` LLM 更新（事实/偏好/已回答） | 追问记忆落到 answered；失败降级不崩溃 |
+| C3 相关性选择 | `select_history` 按重叠 + 预算选择 | 相关记忆进 prompt、无关不拼；`--reset` 清空 |
 | C4 CLI | `--reset` / `--no-history` 开关 | `pytest -q` 全绿 |
 
 **新增依赖**：无（复用现有 LLM；磁盘 JSON 用 stdlib）。
+
+### 12b. 检索质量与 token 预算（✅ 已实现 2026-08-11）
+
+> 三个改进：真实 token 计数 · 双路检索（向量+BM25）· reranker 重排
+
+#### 12b.1 token 计数：tiktoken 精确 + 语言感知降级（`paper_agent/tokens.py`）
+
+- 问题：`len(text)//3` 对中文（1 字符 ≈ 1.5 token）严重低估、对英文高估。
+- 方案：优先 **tiktoken**（cl100k_base，DeepSeek/OpenAI 兼容近似）精确计数，懒加载不拖启动；
+  不可用时按语言感知降级（中文 1 字符 ≈ 1.5 token，英文 1 token ≈ 4 字符）。
+- 应用：`graph/nodes.py` 摘要/抽取截断（`truncate_head` / `truncate_head_tail`）、
+  `conversations.py` 记忆预算，全部改为 token 精确计数。
+- 常量：`INPUT_TOKEN_BUDGET=50K`、`SUMMARY_TOKEN_BUDGET=40K`（原 `*3` 字符预算移除）。
+
+#### 12b.2 双路检索：bge-m3 向量 + BM25 关键词（`paper_agent/bm25.py`）
+
+- MMR 只做多样性去重、精度一般；向量检索对精确关键词命中（公式/术语/编号）弱。
+- 方案：向量 top-k（语义）+ BM25 top-k（精确命中，纯 Python 零依赖：英文按词、中文按字符 bigram）→ 合并去重。
+- 常量：`RAG_HYBRID_K=10`（各路取 top-k 合并）。
+
+#### 12b.3 reranker 重排：bge-reranker-v2-m3
+
+- 合并结果用 `BAAI/bge-reranker-v2-m3`（与 embedding 同源，CPU 可跑，懒加载单例）打分重排。
+- **按重排分数降序截断** 12K 上下文（替代原"按拼接顺序截断"）；分数 < `RAG_RERANK_MIN_SCORE=0.1` 淘汰低相关块。
+- reranker 不可用（离线/下载失败）→ 回退合并结果，保持可用性。
+
+#### 12b.4 里程碑与验证
+
+| 子阶段 | 内容 | 验证 |
+|---|---|---|
+| R1 tokens | `tokens.py` + nodes/conversations 接入 | 中文文本 token 计数不再低估；`pytest` 绿 |
+| R2 BM25 | `bm25.py` + 双路合并 | 关键词命中进候选；BM25 单测绿 |
+| R3 rerank | bge-reranker-v2-m3 接入 + 分数截断 | 重排后上下文按分数排序；reranker 不可用时回退 |
+
+**新增依赖**：`tiktoken`（已装）；reranker 模型 `BAAI/bge-reranker-v2-m3` 需 hf-mirror 下载一次（懒加载，首次 ask 时下载）。

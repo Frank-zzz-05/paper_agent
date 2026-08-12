@@ -1,13 +1,14 @@
-"""多轮对话历史管理（development-plan §12）：按论文隔离，磁盘持久化。
+"""多轮对话记忆（development-plan §12）：按论文隔离，磁盘持久化，结构化压缩。
 
 存储：data/conversations/{paper_id}.json
 {
-  "summary": str | None,   # LLM 滚动摘要（压缩后保留的旧上下文）
-  "turns": [{"role": "user"|"assistant", "content": str}, ...]
+  "facts":        ["已确认事实", ...],
+  "preferences":  ["用户偏好/关注点", ...],
+  "answered":     [{"q": "...", "a": "...", "t": "..."}, ...]
 }
 
-只依赖 stdlib（json / pathlib），不经 paper_agent 包顶层导入，保持轻量。
-LLM 滚动压缩（Tier B）由调用方注入 summarize_fn，本模块不直接调 LLM。
+设计：不用滑动窗口保留原始轮次，而是由 LLM 把每轮问答**压缩**进结构化槽位；
+拼 prompt 时按与当前问题的相关性**选择**命中项（而非全量），受 token 预算约束。
 """
 
 from __future__ import annotations
@@ -17,48 +18,68 @@ from typing import Callable
 
 from paper_agent import config
 
+_EMPTY = {"facts": [], "preferences": [], "answered": []}
+
 
 def _path(paper_id: str) -> object:
     return config.CONVERSATIONS_DIR / f"{paper_id}.json"
 
 
 def get_history(paper_id: str) -> dict:
-    """读取某篇论文的对话历史。返回 {"summary": str|None, "turns": [...]}。"""
+    """读取某篇论文的结构化记忆。旧格式（summary/turns）不再兼容，返回空。"""
     try:
         data = json.loads(_path(paper_id).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"summary": None, "turns": []}
+        return {"facts": [], "preferences": [], "answered": []}
+    if not isinstance(data, dict) or "turns" in data:  # 旧格式
+        return {"facts": [], "preferences": [], "answered": []}
     return {
-        "summary": data.get("summary"),
-        "turns": data.get("turns", []),
+        "facts": list(data.get("facts") or []),
+        "preferences": list(data.get("preferences") or []),
+        "answered": list(data.get("answered") or []),
     }
 
 
-def save(paper_id: str, history: dict) -> None:
-    """写入完整历史（含 summary），原子写。"""
+def save(paper_id: str, memory: dict) -> None:
+    """写入结构化记忆，原子写。"""
     config.CONVERSATIONS_DIR.mkdir(parents=True, exist_ok=True)
     tmp = _path(f"{paper_id}.tmp")
     tmp.write_text(
-        json.dumps({"summary": history.get("summary"), "turns": history.get("turns", [])},
-                   ensure_ascii=False, indent=2),
+        json.dumps(
+            {"facts": memory.get("facts", []), "preferences": memory.get("preferences", []),
+             "answered": memory.get("answered", [])},
+            ensure_ascii=False, indent=2,
+        ),
         encoding="utf-8",
     )
     tmp.replace(_path(paper_id))
 
 
-def append_turn(paper_id: str, user: str, assistant: str, summarize_fn: Callable[[str], str] | None = None) -> None:
-    """问答完成后追加一轮（user + assistant）。
+def update_memory(
+    paper_id: str,
+    question: str,
+    answer: str,
+    update_fn: Callable[[dict, str, str], dict | None],
+) -> dict:
+    """问答后把本轮并入结构化记忆（LLM 压缩）。
 
-    传 summarize_fn 时在追加后**立即整理**（高水位压缩），
-    保证下次提问的起点历史已低于预算（留出余量，不会临时挤爆）。
+    update_fn(existing, question, answer) -> 新记忆 dict；返回 None 表示更新失败，
+    此时安全降级：仅把本轮追加进 answered（不崩溃）。
     """
-    history = get_history(paper_id)
-    history.setdefault("turns", []).append({"role": "user", "content": user})
-    if assistant:
-        history["turns"].append({"role": "assistant", "content": assistant})
-    if summarize_fn is not None:
-        history = trim_history(history, summarize_fn)
-    save(paper_id, history)
+    memory = get_history(paper_id)
+    try:
+        updated = update_fn(memory, question, answer)
+    except Exception:
+        updated = None
+    if not updated or not isinstance(updated, dict):
+        updated = dict(memory)
+        updated.setdefault("answered", []).append(
+            {"q": question, "a": answer, "t": "turn"}
+        )
+    # 兜底：answered 有界（防 LLM 超发）
+    updated["answered"] = (updated.get("answered") or [])[-config.RAG_MEMORY_MAX_ANSWERED:]
+    save(paper_id, updated)
+    return updated
 
 
 def clear(paper_id: str) -> bool:
@@ -82,78 +103,63 @@ def clear_all() -> int:
 
 
 # ---------------------------------------------------------------------------
-# 压缩：滑动窗口（Tier A）+ LLM 滚动摘要（Tier B）
+# 相关性选择：按当前问题挑选命中记忆，非全量
 # ---------------------------------------------------------------------------
 
-
-def _turns_to_text(turns: list[dict]) -> str:
-    lines = []
-    for t in turns:
-        role = "用户" if t.get("role") == "user" else "助手"
-        lines.append(f"{role}：{t.get('content', '')}")
-    return "\n".join(lines)
-
-
-def _occupied_chars(summary: str, turns: list[dict]) -> int:
-    """当前历史占用：旧摘要 + 本轮次内容的总字符数。"""
-    return len(summary) + sum(len(x.get("content", "")) for x in turns)
+# 常见中文功能词/疑问词：字符 bigram 切分易让"什么/是什"等产生假命中，从查询 token 中剔除
+_STOPWORDS = {
+    "的", "了", "是", "吗", "呢", "啊", "吧", "和", "与", "在", "有", "就", "都", "而", "及", "或",
+    "个", "这", "那", "其", "中",
+    "什么", "怎么", "如何", "为什么", "哪个", "哪里", "何时", "是否", "是什", "怎样", "咋样", "咋",
+    "一个", "这个", "那个", "一些", "这些", "那些", "这样", "那样", "以及", "还是",
+}
 
 
-def trim_history(
-    history: dict,
-    summarize_fn: Callable[[str], str] | None = None,
-) -> dict:
-    """将历史裁剪到高水位内，返回可持久化/拼 prompt 的 {"summary", "turns"}。
+def _tokens(text: str) -> set[str]:
+    from paper_agent.bm25 import tokenize
 
-    两级压缩 + 高水位余量：
-    - Tier A 滑动窗口：turns 超过 RAG_HISTORY_MAX_TURNS → 把超出的最旧轮次划入待压缩池（零成本）。
-    - Tier B 滚动摘要：历史占用超过 **预算 85%（高水位）** 时，把"旧摘要 + 待压缩池 + 最旧问答对"
-      折成一段 LLM 滚动摘要（单次调用），把占用压回高水位之下，给下一轮留 15% 余量。
-    - 兜底：仍超硬预算 → 从最旧问答对丢弃。
+    return set(tokenize(text)) - _STOPWORDS
 
-    summarize_fn 注入 LLM 压缩（失败/空串时安全降级为直接丢弃，不阻塞）。
+
+def _overlap_score(text: str, q_tokens: set[str]) -> int:
+    if not q_tokens:
+        return 0
+    return len(_tokens(text) & q_tokens)
+
+
+def select_history(memory: dict, question: str, max_tokens: int | None = None) -> str:
+    """按相关性选择记忆拼接为 prompt 段（受 token 预算约束）。无命中返回 ""。
+
+    对每个 事实/偏好/已回答 计算与问题的 token 重叠（剔除停用词），
+    按分数降序累积到预算上限。
     """
-    summary = history.get("summary") or ""
-    turns = list(history.get("turns") or [])
-    hard = config.RAG_HISTORY_MAX_CHARS
-    high_water = int(hard * config.RAG_HISTORY_COMPRESS_THRESHOLD)
+    from paper_agent.tokens import estimate_tokens
 
-    # ---- Tier A：滑动窗口，超出的最旧轮进待压缩池 ----
-    max_turns = config.RAG_HISTORY_MAX_TURNS
-    condense: list[dict] = []
-    if len(turns) > max_turns:
-        condense = turns[: len(turns) - max_turns]
-        turns = turns[len(turns) - max_turns:]
+    budget = max_tokens if max_tokens is not None else config.RAG_HISTORY_MAX_TOKENS
+    q_tokens = _tokens(question)
+    if not q_tokens:
+        return ""
 
-    # ---- 高水位检查：占用 > 预算 85% 才主动压缩（留 15% 余量） ----
-    if _occupied_chars(summary, turns) > high_water:
-        # 把最旧问答对继续让出，直到占用回到高水位之下
-        while len(turns) >= 2 and _occupied_chars(summary, turns) > high_water:
-            condense.extend(turns[:2])
-            turns = turns[2:]
-        # Tier B：折叠"旧摘要 + 待压缩池"为 LLM 滚动摘要（单次调用）
-        if condense and summarize_fn is not None:
-            merged = f"{summary}\n{_turns_to_text(condense)}".strip()
-            try:
-                condensed = summarize_fn(merged)
-                if condensed:
-                    summary = condensed
-            except Exception:
-                pass  # 压缩失败 → 旧轮直接丢弃，安全降级
+    items: list[tuple[int, str, str]] = []  # (score, label, text)
+    for f in memory.get("facts", []):
+        if f:
+            items.append((_overlap_score(f, q_tokens), "事实", str(f)))
+    for p in memory.get("preferences", []):
+        if p:
+            items.append((_overlap_score(p, q_tokens), "偏好", str(p)))
+    for t in memory.get("answered", []):
+        text = f"问：{t.get('q', '')} 答：{t.get('a', '')}"
+        items.append((_overlap_score(f"{t.get('q','')} {t.get('a','')}", q_tokens), "已回答", text))
 
-    # ---- 兜底：硬预算仍溢出（摘要异常膨胀等病态）→ 丢弃最旧问答对 ----
-    while len(turns) >= 2 and _occupied_chars(summary, turns) > hard:
-        turns = turns[2:]
+    picked = [it for it in items if it[0] > 0]
+    picked.sort(key=lambda x: x[0], reverse=True)
 
-    return {"summary": summary, "turns": turns}
-
-
-def format_history(summary: str | None, turns: list[dict]) -> str:
-    """把 (summary, turns) 格式化为拼进 prompt 的历史段文本。为空返回 ""。"""
     parts: list[str] = []
-    if summary:
-        parts.append(f"（对话摘要）{summary}")
-    text = _turns_to_text(turns)
-    if text:
-        parts.append(text)
+    used = 0
+    for score, label, text in picked:
+        tok = estimate_tokens(text)
+        if used + tok > budget:
+            break
+        parts.append(f"- [{label}] {text}")
+        used += tok
     return "\n".join(parts)

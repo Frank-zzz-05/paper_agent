@@ -19,23 +19,12 @@ from paper_agent.prompts import (
     build_summary_human,
     build_summary_system,
 )
+from paper_agent.tokens import truncate_head, truncate_head_tail
 
 
 def _progress(msg: str) -> None:
     """节点进度打印到 stderr（不影响 stdout 的结果输出）。"""
     print(f"→ {msg}", file=sys.stderr, flush=True)
-
-
-def _head(text: str, max_chars: int) -> str:
-    return text if len(text) <= max_chars else text[:max_chars]
-
-
-def _head_tail(text: str, max_chars: int) -> str:
-    """头尾截断：保留开头（引言/方法）与结尾（实验/结论）。"""
-    if len(text) <= max_chars:
-        return text
-    half = max_chars // 2
-    return text[:half] + config.TRUNCATE_ELLIPSIS + text[-half:]
 
 
 def load_documents(state: AgentState) -> dict:
@@ -53,7 +42,7 @@ def summarize(state: AgentState) -> dict:
     _progress("生成摘要与要点…")
     paper = state["paper"]
     lang = state["options"].get("lang", "zh")
-    text = _head(paper.text, config.SUMMARY_TRUNCATE_CHARS)
+    text = truncate_head(paper.text, config.SUMMARY_TOKEN_BUDGET)
     try:
         llm = get_llm(temperature=config.LLM_TEMPERATURE_SUMMARY)
         summary = structured_invoke(
@@ -73,7 +62,7 @@ def extract(state: AgentState) -> dict:
     _progress("抽取结构化信息…")
     paper = state["paper"]
     lang = state["options"].get("lang", "zh")
-    text = _head_tail(paper.text, config.MAX_LLM_CHARS)
+    text = truncate_head_tail(paper.text, config.INPUT_TOKEN_BUDGET)
     try:
         llm = get_llm(temperature=config.LLM_TEMPERATURE_EXTRACT)
         extraction = structured_invoke(

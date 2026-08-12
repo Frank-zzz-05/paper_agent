@@ -48,11 +48,10 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 
-# ---- Token 预算 ----
-# deepseek-chat 上下文 64K；估算 len(text)//3（粗估，偏保守），为输出预留 → 输入上限 50K
+# ---- Token 预算（用 tokens.py 精确计数，见 §token 估算） ----
+# deepseek-chat 上下文 64K，输入预算 50K，为输出预留
 INPUT_TOKEN_BUDGET = 50_000
-MAX_LLM_CHARS = INPUT_TOKEN_BUDGET * 3          # ≈50K token
-SUMMARY_TRUNCATE_CHARS = 40_000 * 3             # ≈40K token，摘要只喂开头（标题/摘要/引言优先）
+SUMMARY_TOKEN_BUDGET = 40_000                  # 摘要只喂开头（标题/摘要/引言优先）
 TRUNCATE_ELLIPSIS = "\n\n[... 中间内容省略 ...]\n\n"  # 抽取用头尾拼接的省略标记
 
 # ---- 数据目录 ----
@@ -73,13 +72,15 @@ SECTION_MIN_CHARS = 150   # 短于此长度的 section 与相邻节合并
 # RAG 检索
 RAG_TOP_K = 5             # 默认检索块数
 RAG_FETCH_K = 10          # 实际获取块数（去重/合并后取 top_k）
+# 双路混合检索 + 重排（bge-m3 向量 + BM25 关键词）
+RAG_HYBRID_K = 10         # 向量、BM25 各自取 top-k 合并
+RAG_RERANK_MIN_SCORE = 0.1  # 重排分数低于此值淘汰低相关块
+RAG_RERANK_MODEL = "BAAI/bge-reranker-v2-m3"
 # RAG 回答 token 预算
 RAG_MAX_CONTEXT_CHARS = 12_000   # 检索上下文上限（≈4K token）
 RAG_LLM_MAX_TOKENS = 2048        # 回答最大 token
 
 # ---- 多轮对话上下文（development-plan §12） ----
 # 历史按 paper_id 隔离，磁盘持久化 data/conversations/{paper_id}.json
-RAG_HISTORY_MAX_TOKENS = 4000            # 历史段 token 预算（≈8K 字符）
-RAG_HISTORY_MAX_CHARS = RAG_HISTORY_MAX_TOKENS * 3  # ≈8000 字符
-RAG_HISTORY_MAX_TURNS = 6                # 滑动窗口：保留最近 6 轮（3 问 3 答）原文
-RAG_HISTORY_COMPRESS_THRESHOLD = 0.85    # 高水位：历史占用达预算 85% 即主动压缩，留 15% 余量
+RAG_HISTORY_MAX_TOKENS = 4000            # 历史段 token 预算（用 tokens.estimate_tokens 计数）
+RAG_MEMORY_MAX_ANSWERED = 10             # 结构化记忆 answered 上限（LLM 压缩后兜底裁剪）

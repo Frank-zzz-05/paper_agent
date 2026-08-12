@@ -98,6 +98,36 @@ class PaperSummary(BaseModel):
         return v
 
 
+class MemoryTurn(BaseModel):
+    """多轮记忆中的一条已回答问答。"""
+
+    q: str = Field(description="用户问题")
+    a: str = Field(description="回答摘要")
+
+
+class ConversationMemory(BaseModel):
+    """结构化多轮记忆（development-plan §12 结构化压缩）。
+
+    替代"原始轮次 + 滚动摘要"：LLM 把对话压缩为三类结构化信息，
+    prompt 时按相关性选择而非全量拼接。
+    """
+
+    facts: list[str] = Field(
+        default_factory=list, description="已确认事实（论文信息、结论，去重去冗余）"
+    )
+    preferences: list[str] = Field(
+        default_factory=list, description="用户偏好/关注点（反复追问的主题、输出偏好）"
+    )
+    answered: list[MemoryTurn] = Field(
+        default_factory=list, description="已回答问题列表（保留最近 N 条）"
+    )
+
+    @field_validator("facts", "preferences", mode="before")
+    @classmethod
+    def _coerce_list_fields(cls, v):
+        return _split_to_list(v)
+
+
 class PaperExtraction(BaseModel):
     """结构化信息抽取。"""
 

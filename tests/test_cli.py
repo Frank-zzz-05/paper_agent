@@ -13,11 +13,20 @@ runner = CliRunner()
 
 @pytest.fixture(autouse=True)
 def _no_auto_ingest(monkeypatch):
-    """所有 CLI 测试阻断自动入库与向量库清空（避免加载真实 embedding 模型 bge-m3）。"""
+    """所有 CLI 测试阻断自动入库、向量库清空与真实 LLM（bge-m3 / DeepSeek）。"""
     from paper_agent import cli
 
     monkeypatch.setattr(cli, "_auto_ingest", lambda **kw: None)
     monkeypatch.setattr("paper_agent.vectorstore.clear_all", lambda: 0)
+    # 结构化记忆更新用假实现，避免真实 LLM 调用
+    monkeypatch.setattr(
+        cli, "_update_memory",
+        lambda existing, q, a: {
+            "facts": (existing.get("facts") or []) + [f"事实:{q}"],
+            "preferences": existing.get("preferences") or [],
+            "answered": (existing.get("answered") or []) + [{"q": q, "a": a}],
+        },
+    )
 
 
 def test_read_metadata_only_offline(sample_pdf):
@@ -188,7 +197,7 @@ def test_ask_with_mock_rag(monkeypatch, tmp_cache):
 
 
 def test_ask_multi_turn_history(monkeypatch, tmp_cache):
-    """多轮：第一问无历史，第二问自动拼入前一轮；历史落盘。"""
+    """多轮：第一问无记忆，第二问按相关性拼入；结构化记忆落盘。"""
     from paper_agent import cli, config, conversations, vectorstore
 
     monkeypatch.setattr(config, "CONVERSATIONS_DIR", tmp_cache.parent / "conversations")
@@ -211,35 +220,33 @@ def test_ask_multi_turn_history(monkeypatch, tmp_cache):
 
     monkeypatch.setattr("paper_agent.graph.rag_build.build_rag_graph", lambda: FakeRagGraph())
 
-    # 第一问：无历史
+    # 第一问：无记忆
     r1 = runner.invoke(app, ["ask", "方法是什么", "--paper", "p1"])
     assert r1.exit_code == 0
     assert seen_histories == [""]
 
-    # 历史已落盘
+    # 结构化记忆已落盘（answered 含本轮）
     h = conversations.get_history("p1")
-    assert len(h["turns"]) == 2
-    assert h["turns"][0]["content"] == "方法是什么"
+    assert h["answered"][0]["q"] == "方法是什么"
 
-    # 第二问：自动拼入前一轮
-    r2 = runner.invoke(app, ["ask", "局限呢", "--paper", "p1"])
+    # 第二问：相关记忆被选中拼入 prompt
+    r2 = runner.invoke(app, ["ask", "方法的局限呢", "--paper", "p1"])
     assert r2.exit_code == 0
     assert "方法是什么" in seen_histories[1]
-    assert "回答: 方法是什么" in seen_histories[1]
 
-    # 已累积 4 轮
+    # 已累积 2 条 answered
     h = conversations.get_history("p1")
-    assert len(h["turns"]) == 4
+    assert len(h["answered"]) == 2
 
-    # --reset 清空历史
+    # --reset 清空记忆
     r3 = runner.invoke(app, ["ask", "新对话", "--paper", "p1", "--reset"])
     assert r3.exit_code == 0
-    assert seen_histories[2] == ""  # reset 后无历史
+    assert seen_histories[2] == ""  # reset 后无记忆
     h = conversations.get_history("p1")
-    assert len(h["turns"]) == 2  # 只剩新的一轮
+    assert len(h["answered"]) == 1  # 只剩新的一轮
 
-    # --no-history 不读取也不写历史
+    # --no-history 不读取也不写记忆
     r4 = runner.invoke(app, ["ask", "test", "--paper", "p1", "--no-history"])
     assert r4.exit_code == 0
     assert seen_histories[3] == ""
-    assert len(conversations.get_history("p1")["turns"]) == 2  # 未追加
+    assert len(conversations.get_history("p1")["answered"]) == 1  # 未追加

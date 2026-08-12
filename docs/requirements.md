@@ -48,7 +48,7 @@
 
 ### FR-6 RAG 问答与论文语料库（P5，设计已定稿）
 
-- `paper ask "<问题>" [--paper <ID|标题>]`：对已入库论文做向量检索问答；默认检索**最近入库**的一篇，指定 `--paper`（ID 或标题）可检索之前的论文；回答**标注出处**（章节）。
+- `paper ask "<问题>" [--paper <ID|标题>]`：对已入库论文做**双路检索问答**（bge-m3 向量 + BM25 关键词 → bge-reranker-v2-m3 重排）；默认检索**最近入库**的一篇，指定 `--paper`（ID 或标题）可检索之前的论文；回答**标注出处**（章节）；同一论文多轮问答**结构化记忆**（事实/偏好/已回答，按相关性选择拼 prompt）。
 - `paper import <输入…>`：批量分块入库（不生成摘要），供后续检索。
 - `paper read` 成功后**自动入库**（被动积累，默认开启）。
 - 存储：`data/vectorstore/`（chromadb 本地持久化，gitignore）。设计细节见 development-plan.md §11。
@@ -58,7 +58,7 @@
 ## 4. 非功能需求
 
 - **NFR-1 运行环境**：conda env `langchain`（Python 3.12），`E:/Miniconda/envs/langchain/python.exe` 运行，零新增依赖。
-- **NFR-2 成本**：单篇论文通常 2 次 LLM 调用（摘要+抽取），使用 `deepseek-chat`（低价高速）；token 预算受控（输入上限 50K token，超限摘要截断前 40K）。
+- **NFR-2 成本**：单篇论文通常 2 次 LLM 调用（摘要+抽取），使用 `deepseek-chat`（低价高速）；token 预算受控（tiktoken 精确计数，输入上限 50K token，超限摘要截断前 40K）。
 - **NFR-3 离线能力**：本地 PDF 路径完全离线可用。
 - **NFR-4 可观测性**：LangSmith tracing 默认开启（`.env` 已配 `LANGCHAIN_API_KEY`）。
 - **NFR-5 可维护性**：模块化（loaders / graph / llm / prompts / cli 分层），为后续 RAG、Web 阶段复用。

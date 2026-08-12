@@ -25,8 +25,9 @@
 - **多来源输入**：本地 PDF（离线）、arXiv ID（自动下载 + 解析元数据）、网页 URL
 - **双阶段 LangGraph 流水线**：`load → summarize ∥ extract → finalize`（并行分支）
 - **结构化抽取**：研究问题 / 方法 / 数据集 / 实验结果 / 局限 / 贡献 / **核心创新点** / 结论
-- **RAG 问答**：bge-m3 多语言 embedding + ChromaDB，回答**带出处**（章节）
-- **多轮对话**：同一论文的追问自动带上此前问答，按高水位（85%）滚动压缩，`--reset` 开新对话
+- **RAG 问答**：bge-m3 向量 + BM25 关键词**双路检索** + bge-reranker-v2-m3 重排，回答**带出处**（章节）
+- **多轮对话**：同一论文的追问经**结构化压缩**（事实/偏好/已回答列表）记忆，按相关性选择拼 prompt，`--reset` 开新对话
+- **精确 token 预算**：tiktoken 计数（中文不再低估），摘要/抽取/记忆预算可信
 - **磁盘缓存**：`data/cache.json` 重复读取命中；`--no-cache` 强制刷新
 - **完整生命周期**：`read` 自动入库 / `import` 批量灌库 / `delete` 彻底删除 / `clear-cache` 一键清空
 - **JSON 输出**：`--output json` 供程序化消费
@@ -118,10 +119,13 @@ paper delete "Retentive Network"             # 删除也支持按标题匹配
 | 技术点 | 方案 |
 |---|---|
 | Embedding | `BAAI/bge-m3`（中英多语言，1024 维），本地 GPU/CUDA，`HF_ENDPOINT=https://hf-mirror.com` |
+| 双路检索 | bge-m3 向量（语义）+ **BM25 关键词**（纯 Python，中英混合切分）各取 top-k 合并 |
+| 重排 | `bge-reranker-v2-m3` 按分数重排，低分淘汰，按重排分数截断 12K 上下文 |
 | 向量库 | ChromaDB 本地持久化 `data/vectorstore/`，语义检索 + `paper_id` 元数据过滤 |
 | 分块 | 结构优先（按章节切分，带 section 出处）+ 递归兜底（超长节切分） |
 | 回答 | LLM 生成，**必须标注出处** `[标题, 章节]` |
-| 多轮对话 | 按 `paper_id` 隔离的磁盘历史，token 预算 + 高水位（85%）两级压缩（滑动窗口 + LLM 滚动摘要） |
+| token 预算 | **tiktoken 精确计数**（`tokens.py`），中文不再低估 |
+| 多轮对话 | 按 `paper_id` 隔离的磁盘**结构化记忆**（事实/偏好/已回答），LLM 每轮压缩，按相关性选择拼 prompt |
 
 ## ⚙️ 配置（`.env`）
 
@@ -181,8 +185,9 @@ RAG 问答（ask）
 - **LLM** `paper_agent/llm.py`：多后端工厂（DeepSeek / OpenAI / Anthropic / OpenAI 兼容），结构化输出带 function_calling → json_mode → 手动解析三级降级
 - **CLI** `paper_agent/cli.py`：typer 命令 `read / ask / import / list / show / clear-cache / delete`，重依赖命令内懒加载（`list`/`show` 秒开）
 - **缓存** `paper_agent/cache.py`：`data/cache.json` 磁盘缓存，重复读取命中
-- **RAG** `paper_agent/{chunk,vectorstore}.py` + `graph/rag_*.py`：bge-m3 本地 GPU embedding + ChromaDB 向量库
-- **多轮对话** `paper_agent/conversations.py`：按论文隔离的磁盘历史 + 高水位（85%）两级压缩（滑动窗口 + LLM 滚动摘要）
+- **RAG** `paper_agent/{chunk,vectorstore,bm25}.py` + `graph/rag_*.py`：bge-m3 向量 + BM25 关键词双路检索 + bge-reranker-v2-m3 重排 + ChromaDB
+- **多轮对话** `paper_agent/conversations.py`：按论文隔离的磁盘**结构化记忆**（事实/偏好/已回答），LLM 压缩 + 相关性选择
+- **token 预算** `paper_agent/tokens.py`：tiktoken 精确计数 + 语言感知降级
 
 ## 📦 目录结构
 
@@ -197,8 +202,10 @@ paper_agent/
 │   ├── llm.py              # 多后端 LLM 工厂（function_calling → json 降级）
 │   ├── cache.py            # 磁盘缓存
 │   ├── chunk.py            # 结构优先分块
-│   ├── conversations.py    # 多轮对话历史（按论文隔离 + 高水位压缩）
-│   └── vectorstore.py      # ChromaDB 向量库
+│   ├── conversations.py    # 结构化多轮记忆（事实/偏好/已回答 + 相关性选择）
+│   ├── bm25.py             # 纯 Python BM25 关键词检索
+│   ├── tokens.py           # tiktoken 精确计数 + 语言感知降级
+│   └── vectorstore.py      # ChromaDB 向量库 + 双路检索 + reranker 重排
 ├── arxiv_mcp/              # arXiv MCP server（FastMCP）
 ├── tests/                  # 离线单测
 ├── docs/                   # 需求文档与开发计划

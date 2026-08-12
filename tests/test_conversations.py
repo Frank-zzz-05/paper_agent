@@ -1,151 +1,113 @@
-"""对话历史模块测试：存储 + 滑动窗口 + 滚动摘要 + 格式化。"""
+"""结构化对话记忆测试：存储 + LLM 更新 + 相关性选择。"""
 
 from __future__ import annotations
 
 from paper_agent import config, conversations
 
 
-def test_append_get_clear(tmp_path, monkeypatch):
+def test_get_save_clear(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CONVERSATIONS_DIR", tmp_path / "conversations")
     pid = "p1"
 
     # 初始为空
-    assert conversations.get_history(pid) == {"summary": None, "turns": []}
+    assert conversations.get_history(pid) == {"facts": [], "preferences": [], "answered": []}
 
-    conversations.append_turn(pid, "问题1", "回答1")
+    conversations.save(pid, {"facts": ["F1"], "preferences": ["P1"], "answered": [{"q": "Q1", "a": "A1"}]})
     h = conversations.get_history(pid)
-    assert h["turns"] == [{"role": "user", "content": "问题1"}, {"role": "assistant", "content": "回答1"}]
+    assert h["facts"] == ["F1"]
+    assert h["answered"][0]["q"] == "Q1"
 
-    conversations.append_turn(pid, "问题2", "回答2")
-    h = conversations.get_history(pid)
-    assert [t["role"] for t in h["turns"]] == ["user", "assistant", "user", "assistant"]
-    assert h["turns"][-1]["content"] == "回答2"
-
-    # clear 后消失
     assert conversations.clear(pid) is True
-    assert conversations.get_history(pid) == {"summary": None, "turns": []}
+    assert conversations.get_history(pid) == {"facts": [], "preferences": [], "answered": []}
     assert conversations.clear(pid) is False
 
 
-def test_trim_sliding_window(tmp_path, monkeypatch):
-    """Tier A：超过 MAX_TURNS 轮只保留最近 N 轮，不调 LLM。"""
+def test_update_memory_with_llm(tmp_path, monkeypatch):
+    """update_memory 用 update_fn（LLM）合并新问答进结构化记忆。"""
     monkeypatch.setattr(config, "CONVERSATIONS_DIR", tmp_path / "conversations")
-    monkeypatch.setattr(config, "RAG_HISTORY_MAX_TURNS", 4)
+    conversations.save("p1", {"facts": ["旧事实"], "preferences": [], "answered": []})
 
-    turns = []
-    for i in range(10):
-        turns.append({"role": "user", "content": f"q{i}"})
-        turns.append({"role": "assistant", "content": f"a{i}"})
+    def fake_update(existing, q, a):
+        return {
+            "facts": existing["facts"] + [f"新事实: {q}"],
+            "preferences": existing["preferences"] + ["关注方法"],
+            "answered": existing["answered"] + [{"q": q, "a": a}],
+        }
 
-    called = {"n": 0}
-    def summarize_fn(text):
-        called["n"] += 1
-        return "压缩摘要"
+    result = conversations.update_memory("p1", "方法是什么", "用了 Transformer", fake_update)
+    assert "新事实: 方法是什么" in result["facts"]
+    assert "关注方法" in result["preferences"]
+    assert result["answered"][-1]["q"] == "方法是什么"
 
-    result = conversations.trim_history({"summary": None, "turns": turns}, summarize_fn=summarize_fn)
-    # 保留最近 4 轮 = 2 问 2 答
-    assert len(result["turns"]) == 4
-    assert result["turns"][0]["content"] == "q8"
-    # 被丢弃的旧轮 + 旧摘要未超预算 → 不触发 LLM
-    assert called["n"] == 0
+    # 已持久化
+    h = conversations.get_history("p1")
+    assert "新事实: 方法是什么" in h["facts"]
 
 
-def test_trim_rolling_summary(tmp_path, monkeypatch):
-    """Tier B：占用 > 高水位（85%）→ 调 LLM 生成滚动摘要，留出余量。"""
+def test_update_memory_fallback_on_failure(tmp_path, monkeypatch):
+    """update_fn 失败 → 安全降级：仅把本轮追加进 answered，不崩溃。"""
     monkeypatch.setattr(config, "CONVERSATIONS_DIR", tmp_path / "conversations")
-    monkeypatch.setattr(config, "RAG_HISTORY_MAX_TURNS", 2)
-    monkeypatch.setattr(config, "RAG_HISTORY_MAX_CHARS", 400)  # 高水位 = 340
-    # 保留的最近 2 轮要超过高水位（340）→ 每轮 ~195 字符
-    turns = []
-    for i in range(10):
-        turns.append({"role": "user", "content": f"问题{i} " + "字" * 190})
-        turns.append({"role": "assistant", "content": f"回答{i} " + "字" * 190})
+    conversations.save("p1", {"facts": ["F"], "preferences": [], "answered": []})
 
-    calls = {"n": 0, "text": ""}
-    def summarize_fn(text):
-        calls["n"] += 1
-        calls["text"] = text
-        return "滚动摘要：前几轮关于方法的讨论。"
-
-    result = conversations.trim_history(
-        {"summary": "旧摘要", "turns": turns}, summarize_fn=summarize_fn
-    )
-    assert calls["n"] == 1
-    assert "滚动摘要" in result["summary"]
-    # 压缩后占用回到高水位之下（余量保证）
-    assert len(result["turns"]) <= 2
-
-
-def test_trim_below_high_water_no_llm(tmp_path, monkeypatch):
-    """占用 < 高水位 → 只做滑动窗口，不调 LLM（零成本）。"""
-    monkeypatch.setattr(config, "CONVERSATIONS_DIR", tmp_path / "conversations")
-    monkeypatch.setattr(config, "RAG_HISTORY_MAX_TURNS", 4)
-    monkeypatch.setattr(config, "RAG_HISTORY_MAX_CHARS", 400)  # 高水位 = 340
-
-    # 10 轮短问答：滑动后 4 轮仅 ~80 字符，远低于高水位
-    turns = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}] * 5
-
-    calls = {"n": 0}
-    def summarize_fn(text):
-        calls["n"] += 1
-        return "摘要"
-
-    result = conversations.trim_history({"summary": None, "turns": turns}, summarize_fn=summarize_fn)
-    assert calls["n"] == 0
-    assert len(result["turns"]) == 4  # 只保留最近 4 轮
-
-
-def test_trim_summarize_failure_downgrades(tmp_path, monkeypatch):
-    """LLM 压缩失败 → 安全降级为直接丢弃旧轮，不崩溃。"""
-    monkeypatch.setattr(config, "CONVERSATIONS_DIR", tmp_path / "conversations")
-    monkeypatch.setattr(config, "RAG_HISTORY_MAX_TURNS", 2)
-    monkeypatch.setattr(config, "RAG_HISTORY_MAX_CHARS", 100)  # 高水位 = 85
-
-    # 每轮 50 字符，保留 2 轮 = 100 > 85 → 触发压缩（但压缩失败）
-    turns = [{"role": "user", "content": "x" * 50}, {"role": "assistant", "content": "y" * 50}] * 5
-
-    def failing(text):
+    def failing(existing, q, a):
         raise RuntimeError("LLM down")
 
-    result = conversations.trim_history({"summary": None, "turns": turns}, summarize_fn=failing)
-    assert result["summary"] == ""
-    assert len(result["turns"]) <= 2
-
-
-def test_append_turn_eager_trim(tmp_path, monkeypatch):
-    """append_turn 传 summarize_fn 时立即按高水位整理，存储有界。"""
-    monkeypatch.setattr(config, "CONVERSATIONS_DIR", tmp_path / "conversations")
-    monkeypatch.setattr(config, "RAG_HISTORY_MAX_TURNS", 2)
-    monkeypatch.setattr(config, "RAG_HISTORY_MAX_CHARS", 400)  # 高水位 = 340
-
-    # 先塞满 8 轮长对话（每轮 ~195 字符，滑动后保留的 2 轮将超高水位 340）
-    hist = {"summary": None, "turns": [
-        {"role": "user", "content": f"q{i}" + "字" * 190} if i % 2 == 0 else {"role": "assistant", "content": f"a{i}" + "字" * 190}
-        for i in range(8)
-    ]}
-    conversations.save("p1", hist)
-
-    calls = {"n": 0}
-    def summarize_fn(text):
-        calls["n"] += 1
-        return "滚动摘要"
-
-    # 追加一轮（内容足够长，滑动后保留的 2 轮超高水位）→ 触发高水位压缩
-    conversations.append_turn("p1", "新问题" + "字" * 190, "新回答" + "字" * 190, summarize_fn=summarize_fn)
-    assert calls["n"] == 1
+    result = conversations.update_memory("p1", "Q", "A", failing)
     h = conversations.get_history("p1")
-    assert h["summary"] == "滚动摘要"
-    assert len(h["turns"]) <= 4  # 有界：原始 + 追加后不会无限增长
+    assert h["facts"] == ["F"]  # 原有保留
+    assert h["answered"][-1]["q"] == "Q"
 
 
-def test_format_history():
-    # 空历史 → 空串
-    assert conversations.format_history(None, []) == ""
-    # 摘要 + 轮次
-    out = conversations.format_history("旧摘要", [
-        {"role": "user", "content": "问题"},
-        {"role": "assistant", "content": "回答"},
-    ])
-    assert "旧摘要" in out
-    assert "用户：问题" in out
-    assert "助手：回答" in out
+def test_update_memory_answered_capped(tmp_path, monkeypatch):
+    """answered 有界：超过上限裁剪。"""
+    monkeypatch.setattr(config, "CONVERSATIONS_DIR", tmp_path / "conversations")
+    monkeypatch.setattr(config, "RAG_MEMORY_MAX_ANSWERED", 2)
+
+    def fake_update(existing, q, a):
+        return {"facts": [], "preferences": [], "answered": existing["answered"] + [{"q": q, "a": a}]}
+
+    for i in range(5):
+        conversations.update_memory("p1", f"Q{i}", f"A{i}", fake_update)
+    h = conversations.get_history("p1")
+    assert len(h["answered"]) == 2
+    assert h["answered"][-1]["q"] == "Q4"  # 保留最近
+
+
+def test_select_history_relevance():
+    """按相关性选择：只有与问题重叠的记忆被选中。"""
+    memory = {
+        "facts": ["Attention 机制的核心是缩放点积注意力", "数据集是 SQuAD"],
+        "preferences": ["偏好简明回答"],
+        "answered": [{"q": "Transformer 有几层？", "a": "12 层"}, {"q": "数据集是什么？", "a": "SQuAD"}],
+    }
+    out = conversations.select_history(memory, "Attention 机制是什么？")
+    assert "Attention" in out
+    assert "点积" in out
+    assert "SQuAD" not in out  # 无关记忆不选中
+    assert "偏好" not in out    # 无关偏好不选中
+
+    # 完全不相关 → 空串（不全量拼接）
+    assert conversations.select_history(memory, "完全无关话题xyz") == ""
+
+
+def test_select_history_budget(tmp_path, monkeypatch):
+    """超过 token 预算 → 截断（按相关性排序优先保留高分项）。"""
+    monkeypatch.setattr(config, "RAG_HISTORY_MAX_TOKENS", 10)
+    memory = {
+        "facts": ["Attention 机制 A", "Attention 机制 B", "Attention 机制 C"],
+        "preferences": [],
+        "answered": [],
+    }
+    out = conversations.select_history(memory, "Attention 机制")
+    assert out  # 至少选中一个
+    assert "C" not in out  # 预算截断，未全量
+
+
+def test_old_format_ignored(tmp_path, monkeypatch):
+    """旧格式（summary/turns）不兼容 → 按空记忆处理。"""
+    monkeypatch.setattr(config, "CONVERSATIONS_DIR", tmp_path / "conversations")
+    config.CONVERSATIONS_DIR.mkdir()
+    (config.CONVERSATIONS_DIR / "p1.json").write_text(
+        '{"summary": "s", "turns": [{"role": "user", "content": "q"}]}', encoding="utf-8"
+    )
+    assert conversations.get_history("p1") == {"facts": [], "preferences": [], "answered": []}

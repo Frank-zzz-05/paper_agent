@@ -33,9 +33,12 @@ def tmp_vectorstore(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "VECTORSTORE_DIR", tmp_path / "vectorstore")
     monkeypatch.setattr(vectorstore, "_embedding_function", FakeEmbeddings())
     monkeypatch.setattr(vectorstore, "_vectorstore", None)
+    monkeypatch.setattr(vectorstore, "_bm25_bundle", None)
+    monkeypatch.setattr(vectorstore, "_reranker", False)  # 测试环境不下载 reranker
     yield vectorstore
     monkeypatch.setattr(vectorstore, "_embedding_function", None)
     monkeypatch.setattr(vectorstore, "_vectorstore", None)
+    monkeypatch.setattr(vectorstore, "_bm25_bundle", None)
 
 
 # 各节正文 >150 字符（避免被短节合并成一块）
@@ -72,6 +75,16 @@ class TestVectorstore:
         # 假 embedding 不具备语义，只验证检索契约：返回论文 p1 的块、带出处
         assert all(d.metadata["paper_id"] == "p1" for d in docs)
         assert all("section" in d.metadata for d in docs)
+
+    def test_hybrid_retrieve_finds_keyword_match(self, tmp_vectorstore):
+        """假 embedding 无语义，但 BM25 关键词路径仍能命中相关块。"""
+        tmp_vectorstore.ingest_paper("p1", _SYNTH_TEXT, "RAG Paper")
+        tmp_vectorstore.ingest_paper("p2", "attention is all you need", "Attn Paper")
+        docs = tmp_vectorstore.retrieve("retrieval augmented generation", paper_id="p1", top_k=3)
+        assert docs
+        assert all(d.metadata["paper_id"] == "p1" for d in docs)
+        # BM25 命中的块应包含检索关键词
+        assert any("retrieval" in d.page_content.lower() for d in docs)
 
     def test_retrieve_without_paper_filter_returns_all(self, tmp_vectorstore):
         tmp_vectorstore.ingest_paper("p1", _SYNTH_TEXT, "RAG Paper")
